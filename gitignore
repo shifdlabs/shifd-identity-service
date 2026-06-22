@@ -1,0 +1,27 @@
+# Environment — jangan pernah commit file ini
+app.env
+.env
+
+# RSA keys — generate locally, jangan commit
+*.pem
+*_b64.txt
+
+# Build artifacts
+bin/
+tmp/
+
+# Air hot reload
+tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/

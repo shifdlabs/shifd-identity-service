@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres-sis
+    ports:
+      - '6501:5432'
+    volumes:
+      - sis-postgres:/var/lib/postgresql/data
+    env_file:
+      - ./app.env
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  pgAdmin:
+    image: dpage/pgadmin4
+    container_name: pgAdmin-sis
+    env_file:
+      - ./app.env
+    ports:
+      - '5051:80'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:alpine
+    container_name: redis-sis
+    ports:
+      - '6381:6379'
+    volumes:
+      - sis-redis:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+volumes:
+  sis-postgres:
+  sis-redis:
