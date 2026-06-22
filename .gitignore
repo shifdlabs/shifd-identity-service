@@ -2,6 +2,9 @@
 app.env
 .env
 
+# Docs — jangan pernah commit file ini
+*.md
+
 # RSA keys — generate locally, jangan commit
 *.pem
 *_b64.txt
