@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/ShifdLabs/shifd-identity-service/middleware"
@@ -61,6 +63,20 @@ func queryPagination(c *gin.Context, defaultLimit int) (page, limit int) {
 		}
 	}
 	return page, limit
+}
+
+// respondUserLimitReached writes the 403 response for *service.UserLimitReachedError,
+// which carries current/limit fields beyond the standard {error, code} envelope.
+func respondUserLimitReached(c *gin.Context, limitErr *service.UserLimitReachedError) {
+	c.JSON(http.StatusForbidden, gin.H{
+		"error": fmt.Sprintf(
+			"User baru tidak dapat ditambahkan: kapasitas organisasi sudah penuh (%d/%d user). Upgrade plan untuk menambah kapasitas user.",
+			limitErr.Current, limitErr.Limit,
+		),
+		"code":    "USER_LIMIT_REACHED",
+		"current": limitErr.Current,
+		"limit":   limitErr.Limit,
+	})
 }
 
 // paginatedResponse wraps items in the standard {items, pagination} shape
@@ -126,6 +142,7 @@ func toSubscriptionResponse(sub model.Subscription) gin.H {
 		"status":     sub.Status,
 		"started_at": sub.StartedAt,
 		"expires_at": sub.ExpiresAt,
+		"user_limit": sub.UserLimit,
 		"created_at": sub.CreatedAt,
 		"updated_at": sub.UpdatedAt,
 	}
@@ -137,6 +154,26 @@ func toSubscriptionsResponse(subs []model.Subscription) []gin.H {
 		result = append(result, toSubscriptionResponse(sub))
 	}
 	return result
+}
+
+// toMembershipResponse maps a raw OrgMembership row (e.g. one just created)
+// into the response shape, unlike toOrgMemberResponse which maps the
+// user-joined view.
+func toMembershipResponse(m *model.OrgMembership) gin.H {
+	if m == nil {
+		return nil
+	}
+	return gin.H{
+		"id":         m.ID,
+		"user_id":    m.UserID,
+		"org_id":     m.OrgID,
+		"role":       m.Role,
+		"status":     m.Status,
+		"invited_by": m.InvitedBy,
+		"invited_at": m.InvitedAt,
+		"joined_at":  m.JoinedAt,
+		"created_at": m.CreatedAt,
+	}
 }
 
 func toOrgMemberResponse(m service.OrgMember) gin.H {
@@ -163,6 +200,23 @@ func toUsersResponse(users []model.User) []gin.H {
 	result := make([]gin.H, 0, len(users))
 	for _, u := range users {
 		result = append(result, toUserResponse(&u))
+	}
+	return result
+}
+
+func toUserOrgResponse(uo service.UserOrg) gin.H {
+	return gin.H{
+		"org":                  toOrganizationResponse(uo.Org),
+		"role":                 uo.Role,
+		"membership_status":    uo.MembershipStatus,
+		"active_subscriptions": toSubscriptionsResponse(uo.ActiveSubscriptions),
+	}
+}
+
+func toUserOrgsResponse(orgs []service.UserOrg) []gin.H {
+	result := make([]gin.H, 0, len(orgs))
+	for _, uo := range orgs {
+		result = append(result, toUserOrgResponse(uo))
 	}
 	return result
 }

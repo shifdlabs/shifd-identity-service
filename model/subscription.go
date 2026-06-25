@@ -8,9 +8,10 @@ import (
 
 // Plan values for Subscription.Plan.
 const (
-	SubscriptionPlanStandard     = "standard"
-	SubscriptionPlanProfessional = "professional"
-	SubscriptionPlanEnterprise   = "enterprise"
+	SubscriptionPlanStandard        = "standard"
+	SubscriptionPlanProfessional    = "professional"
+	SubscriptionPlanEnterprise      = "enterprise"
+	SubscriptionPlanLargeEnterprise = "large_enterprise"
 )
 
 // Status values for Subscription.Status.
@@ -22,6 +23,9 @@ const (
 	SubscriptionStatusSuspended = "suspended"
 )
 
+// ProductShifdApproval is the product_id value for the Shifd Approval product.
+const ProductShifdApproval = "shifd-approval"
+
 // Subscription maps to the subscriptions table.
 type Subscription struct {
 	ID        uuid.UUID `gorm:"column:id;type:uuid;primaryKey;default:gen_random_uuid()"`
@@ -32,6 +36,7 @@ type Subscription struct {
 	StartedAt time.Time `gorm:"column:started_at;not null;default:now()"`
 	ExpiresAt time.Time `gorm:"column:expires_at;not null"`
 	Notes     *string   `gorm:"column:notes;type:text"`
+	UserLimit *int      `gorm:"column:user_limit"`
 	CreatedAt time.Time `gorm:"column:created_at;not null;default:now()"`
 	UpdatedAt time.Time `gorm:"column:updated_at;not null;default:now()"`
 }

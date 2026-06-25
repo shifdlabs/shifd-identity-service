@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ShifdLabs/shifd-identity-service/model"
 	"github.com/ShifdLabs/shifd-identity-service/repository"
@@ -77,6 +78,54 @@ func (s *AdminService) CreateOrgForOwner(ctx context.Context, name, slug, ownerE
 	}
 
 	return s.orgService.CreateOrg(ctx, owner.ID, name, slug)
+}
+
+// AddMember directly adds an existing user (looked up by email) to orgID as an
+// ACTIVE member with the given role — the platform-admin equivalent of
+// OrgService.InviteMember. role must be "admin" or "member" ("owner" is
+// assigned only via org creation).
+func (s *AdminService) AddMember(ctx context.Context, orgID uuid.UUID, email, role string) (*model.OrgMembership, error) {
+	if role != model.OrgRoleAdmin && role != model.OrgRoleMember {
+		return nil, ErrInvalidRole
+	}
+
+	if _, err := s.orgRepo.FindByID(ctx, orgID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrOrgNotFound
+		}
+		return nil, fmt.Errorf("admin: failed to look up organization: %w", err)
+	}
+
+	user, err := s.userRepo.FindByEmail(ctx, normalizeEmail(email))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("admin: failed to look up user: %w", err)
+	}
+
+	if _, err := s.membershipRepo.FindByUserAndOrg(ctx, user.ID, orgID); err == nil {
+		return nil, ErrAlreadyMember
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("admin: failed to check existing membership: %w", err)
+	}
+
+	if err := s.subscriptionSvc.EnforceUserLimit(ctx, orgID); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	membership := &model.OrgMembership{
+		UserID:   user.ID,
+		OrgID:    orgID,
+		Role:     role,
+		Status:   model.OrgMembershipStatusActive,
+		JoinedAt: &now,
+	}
+	if err := s.membershipRepo.Create(ctx, membership); err != nil {
+		return nil, fmt.Errorf("admin: failed to create membership: %w", err)
+	}
+	return membership, nil
 }
 
 // GetOrgDetail returns orgID plus every member and subscription, regardless

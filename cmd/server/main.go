@@ -39,7 +39,7 @@ func main() {
 
 	// Services
 	emailService := service.NewEmailService(cfg)
-	subscriptionService := service.NewSubscriptionService(subscriptionRepo)
+	subscriptionService := service.NewSubscriptionService(subscriptionRepo, orgMembershipRepo)
 	authService := service.NewAuthService(
 		userRepo,
 		refreshTokenRepo,
@@ -55,6 +55,7 @@ func main() {
 		organizationRepo,
 		orgMembershipRepo,
 		subscriptionRepo,
+		subscriptionService,
 		userRepo,
 		emailService,
 	)
@@ -66,14 +67,21 @@ func main() {
 		subscriptionService,
 		orgService,
 	)
+	userService := service.NewUserService(
+		userRepo,
+		orgMembershipRepo,
+		organizationRepo,
+		subscriptionService,
+	)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(authService)
 	jwksHandler := handler.NewJWKSHandler(jwtKeys.Public, jwtKeys.KeyID)
 	orgHandler := handler.NewOrgHandler(orgService, subscriptionService)
 	adminHandler := handler.NewAdminHandler(adminService, subscriptionService)
+	userHandler := handler.NewUserHandler(userService)
 
-	engine := router.New(cfg, authHandler, jwksHandler, orgHandler, adminHandler, jwtKeys.Public, userRepo)
+	engine := router.New(cfg, authHandler, jwksHandler, orgHandler, adminHandler, userHandler, jwtKeys.Public, userRepo)
 
 	addr := fmt.Sprintf(":%s", cfg.AppPort)
 	log.Printf("main: starting server on %s", addr)

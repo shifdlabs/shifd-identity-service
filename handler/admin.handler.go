@@ -37,12 +37,18 @@ type createSubscriptionRequest struct {
 	ProductID string    `json:"product_id" binding:"required"`
 	Plan      string    `json:"plan" binding:"required"`
 	ExpiresAt time.Time `json:"expires_at" binding:"required"`
+	UserLimit *int      `json:"user_limit"`
 }
 
 type updateSubscriptionRequest struct {
 	Status    string     `json:"status"`
 	ExpiresAt *time.Time `json:"expires_at"`
 	Plan      string     `json:"plan"`
+}
+
+type addMemberAdminRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Role  string `json:"role" binding:"required"`
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +129,46 @@ func (h *AdminHandler) GetOrg(c *gin.Context) {
 	})
 }
 
+// AddMember handles POST /api/admin/orgs/:org_id/members.
+func (h *AdminHandler) AddMember(c *gin.Context) {
+	orgID, ok := pathUUID(c, "org_id")
+	if !ok {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid org_id")
+		return
+	}
+
+	var req addMemberAdminRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid request body")
+		return
+	}
+
+	membership, err := h.adminService.AddMember(c.Request.Context(), orgID, req.Email, req.Role)
+	if err != nil {
+		var limitErr *service.UserLimitReachedError
+		switch {
+		case errors.As(err, &limitErr):
+			respondUserLimitReached(c, limitErr)
+		case errors.Is(err, service.ErrNoActiveSubscription):
+			respondError(c, http.StatusForbidden, "SUBSCRIPTION_INACTIVE", "No active subscription found")
+		case errors.Is(err, service.ErrInvalidRole):
+			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		case errors.Is(err, service.ErrUserNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "User with this email not found in SIS")
+		case errors.Is(err, service.ErrOrgNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "Organization not found")
+		case errors.Is(err, service.ErrAlreadyMember):
+			respondError(c, http.StatusConflict, "ALREADY_MEMBER", err.Error())
+		default:
+			log.Printf("handler: admin add member error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"data": toMembershipResponse(membership), "message": "success"})
+}
+
 // CreateSubscription handles POST /api/admin/orgs/:org_id/subscriptions.
 func (h *AdminHandler) CreateSubscription(c *gin.Context) {
 	orgID, ok := pathUUID(c, "org_id")
@@ -137,7 +183,7 @@ func (h *AdminHandler) CreateSubscription(c *gin.Context) {
 		return
 	}
 
-	sub, err := h.subscriptionService.CreateSubscription(c.Request.Context(), orgID, req.ProductID, req.Plan, req.ExpiresAt)
+	sub, err := h.subscriptionService.CreateSubscription(c.Request.Context(), orgID, req.ProductID, req.Plan, req.ExpiresAt, req.UserLimit)
 	if err != nil {
 		log.Printf("handler: admin create subscription error: %v", err)
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")

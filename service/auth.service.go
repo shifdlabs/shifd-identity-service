@@ -173,12 +173,12 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 		return nil, fmt.Errorf("auth: failed to reset failed logins: %w", err)
 	}
 
-	membership, products, err := s.resolveOrgContext(ctx, user.ID, orgID)
+	membership, products, userLimit, err := s.resolveOrgContext(ctx, user.ID, orgID)
 	if err != nil {
 		return nil, err
 	}
 
-	accessToken, err := s.issueAccessToken(user, membership, products)
+	accessToken, err := s.issueAccessToken(user, membership, products, userLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -222,28 +222,28 @@ func (s *AuthService) handleFailedLogin(ctx context.Context, user *model.User) e
 	return &AccountLockedError{LockTimestamp: &now}
 }
 
-// resolveOrgContext picks the org membership (and its active product IDs) to
-// embed in the JWT. If orgID is non-nil the user must be an active member of
-// that org or ErrForbidden is returned. If orgID is nil, the user's first
-// active membership is used; a user with no active memberships gets a nil
-// membership (no org claims) rather than an error.
-func (s *AuthService) resolveOrgContext(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID) (*model.OrgMembership, []string, error) {
+// resolveOrgContext picks the org membership (and its active product IDs and
+// seat limit) to embed in the JWT. If orgID is non-nil the user must be an
+// active member of that org or ErrForbidden is returned. If orgID is nil, the
+// user's first active membership is used; a user with no active memberships
+// gets a nil membership (no org claims) rather than an error.
+func (s *AuthService) resolveOrgContext(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID) (*model.OrgMembership, []string, *int, error) {
 	if orgID != nil {
 		membership, err := s.orgMembershipRepo.FindByUserAndOrg(ctx, userID, *orgID)
 		if err != nil || membership.Status != model.OrgMembershipStatusActive {
-			return nil, nil, ErrForbidden
+			return nil, nil, nil, ErrForbidden
 		}
 
-		products, err := s.subscriptionService.GetActiveProductsForOrg(ctx, membership.OrgID)
+		products, userLimit, err := s.loadProductsAndUserLimit(ctx, membership.OrgID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("auth: failed to load subscriptions: %w", err)
+			return nil, nil, nil, err
 		}
-		return membership, products, nil
+		return membership, products, userLimit, nil
 	}
 
 	memberships, err := s.orgMembershipRepo.FindAllByUserID(ctx, userID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("auth: failed to load org memberships: %w", err)
+		return nil, nil, nil, fmt.Errorf("auth: failed to load org memberships: %w", err)
 	}
 
 	for i := range memberships {
@@ -251,18 +251,39 @@ func (s *AuthService) resolveOrgContext(ctx context.Context, userID uuid.UUID, o
 			continue
 		}
 		membership := memberships[i]
-		products, err := s.subscriptionService.GetActiveProductsForOrg(ctx, membership.OrgID)
+		products, userLimit, err := s.loadProductsAndUserLimit(ctx, membership.OrgID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("auth: failed to load subscriptions: %w", err)
+			return nil, nil, nil, err
 		}
-		return &membership, products, nil
+		return &membership, products, userLimit, nil
 	}
 
-	return nil, nil, nil
+	return nil, nil, nil, nil
 }
 
-func (s *AuthService) issueAccessToken(user *model.User, membership *model.OrgMembership, products []string) (string, error) {
-	claims := buildClaims(user, membership, products)
+// loadProductsAndUserLimit returns the active product IDs for orgID plus the
+// seat limit to embed in the JWT: the smallest UserLimit among orgID's active
+// subscriptions, or nil if none of them carry a limit (unlimited).
+func (s *AuthService) loadProductsAndUserLimit(ctx context.Context, orgID uuid.UUID) ([]string, *int, error) {
+	subs, err := s.subscriptionService.ListActiveByOrg(ctx, orgID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("auth: failed to load subscriptions: %w", err)
+	}
+
+	products := make([]string, 0, len(subs))
+	var userLimit *int
+	for _, sub := range subs {
+		products = append(products, sub.ProductID)
+		if sub.UserLimit != nil && (userLimit == nil || *sub.UserLimit < *userLimit) {
+			limit := *sub.UserLimit
+			userLimit = &limit
+		}
+	}
+	return products, userLimit, nil
+}
+
+func (s *AuthService) issueAccessToken(user *model.User, membership *model.OrgMembership, products []string, userLimit *int) (string, error) {
+	claims := buildClaims(user, membership, products, userLimit)
 	return jwtutil.GenerateAccessToken(s.privateKey, s.cfg.JWTKeyID, s.cfg.JWTIssuer, s.cfg.JWTAccessTokenExpiry, claims)
 }
 
@@ -289,8 +310,10 @@ func (s *AuthService) issueRefreshToken(ctx context.Context, userID uuid.UUID, m
 }
 
 // buildClaims assembles the JWT claims map per the CLAUDE.md JWT Claims
-// Structure. org_id/org_role/products are omitted when membership is nil.
-func buildClaims(user *model.User, membership *model.OrgMembership, products []string) map[string]interface{} {
+// Structure. org_id/org_role/products/user_limit are omitted when membership
+// is nil. user_limit is -1 when the org's active subscriptions carry no seat
+// limit (unlimited), keeping the claim an integer for downstream parsing.
+func buildClaims(user *model.User, membership *model.OrgMembership, products []string, userLimit *int) map[string]interface{} {
 	claims := map[string]interface{}{
 		"sub":   user.ID.String(),
 		"email": user.Email,
@@ -300,6 +323,11 @@ func buildClaims(user *model.User, membership *model.OrgMembership, products []s
 		claims["org_id"] = membership.OrgID.String()
 		claims["org_role"] = membership.Role
 		claims["products"] = products
+		if userLimit != nil {
+			claims["user_limit"] = *userLimit
+		} else {
+			claims["user_limit"] = -1
+		}
 	}
 	return claims
 }
@@ -337,18 +365,19 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (stri
 	// the refresh outright.
 	var membership *model.OrgMembership
 	var products []string
+	var userLimit *int
 	if refreshToken.OrgID != nil {
 		candidate, mErr := s.orgMembershipRepo.FindByUserAndOrg(ctx, user.ID, *refreshToken.OrgID)
 		if mErr == nil && candidate.Status == model.OrgMembershipStatusActive {
 			membership = candidate
-			products, err = s.subscriptionService.GetActiveProductsForOrg(ctx, candidate.OrgID)
+			products, userLimit, err = s.loadProductsAndUserLimit(ctx, candidate.OrgID)
 			if err != nil {
-				return "", fmt.Errorf("auth: failed to load subscriptions: %w", err)
+				return "", err
 			}
 		}
 	}
 
-	return s.issueAccessToken(user, membership, products)
+	return s.issueAccessToken(user, membership, products, userLimit)
 }
 
 // Logout revokes the refresh token identified by rawRefreshToken. It is

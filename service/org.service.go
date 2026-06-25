@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -68,6 +67,7 @@ type OrgService struct {
 	orgRepo          *repository.OrganizationRepository
 	membershipRepo   *repository.OrgMembershipRepository
 	subscriptionRepo *repository.SubscriptionRepository
+	subscriptionSvc  *SubscriptionService
 	userRepo         *repository.UserRepository
 	emailService     *EmailService
 }
@@ -77,6 +77,7 @@ func NewOrgService(
 	orgRepo *repository.OrganizationRepository,
 	membershipRepo *repository.OrgMembershipRepository,
 	subscriptionRepo *repository.SubscriptionRepository,
+	subscriptionSvc *SubscriptionService,
 	userRepo *repository.UserRepository,
 	emailService *EmailService,
 ) *OrgService {
@@ -85,6 +86,7 @@ func NewOrgService(
 		orgRepo:          orgRepo,
 		membershipRepo:   membershipRepo,
 		subscriptionRepo: subscriptionRepo,
+		subscriptionSvc:  subscriptionSvc,
 		userRepo:         userRepo,
 		emailService:     emailService,
 	}
@@ -183,67 +185,71 @@ func (s *OrgService) GetOrgByID(ctx context.Context, orgID, requesterUserID uuid
 	}, nil
 }
 
-// InviteMember invites inviteeEmail (an existing user) to orgID. inviterUserID
-// must be an active owner or admin. The new membership starts as "invited";
-// AcceptInvite is what activates it.
-func (s *OrgService) InviteMember(ctx context.Context, orgID, inviterUserID uuid.UUID, inviteeEmail string) error {
+// InviteMember adds inviteeEmail (an existing SIS user) directly to orgID as
+// an active member. inviterUserID must be an active owner or admin. role is
+// the role to grant the invitee ("admin" or "member"); an empty role
+// defaults to "member".
+//
+// The invite-email/accept flow is not used here: the membership is created
+// with status "active" immediately, since there is no SIS account
+// requirement to defer activation for. It can be re-added later as an
+// enhancement for inviting people who don't have an SIS account yet.
+func (s *OrgService) InviteMember(ctx context.Context, orgID, inviterUserID uuid.UUID, inviteeEmail, role string) (*model.OrgMembership, error) {
 	inviter, err := s.getActiveMembership(ctx, inviterUserID, orgID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if inviter.Role != model.OrgRoleOwner && inviter.Role != model.OrgRoleAdmin {
-		return ErrInsufficientPermissions
+		return nil, ErrInsufficientPermissions
+	}
+
+	if role == "" {
+		role = model.OrgRoleMember
+	}
+	if role != model.OrgRoleAdmin && role != model.OrgRoleMember {
+		return nil, ErrInvalidRole
 	}
 
 	normalizedEmail := normalizeEmail(inviteeEmail)
 	invitee, err := s.userRepo.FindByEmail(ctx, normalizedEmail)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrUserNotFound
+			return nil, ErrUserNotFound
 		}
-		return fmt.Errorf("org: failed to look up invitee: %w", err)
+		return nil, fmt.Errorf("org: failed to look up invitee: %w", err)
 	}
 
 	if _, err := s.membershipRepo.FindByUserAndOrg(ctx, invitee.ID, orgID); err == nil {
-		return ErrAlreadyMember
+		return nil, ErrAlreadyMember
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("org: failed to check existing membership: %w", err)
+		return nil, fmt.Errorf("org: failed to check existing membership: %w", err)
 	}
 
-	org, err := s.orgRepo.FindByID(ctx, orgID)
-	if err != nil {
+	if _, err := s.orgRepo.FindByID(ctx, orgID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrOrgNotFound
+			return nil, ErrOrgNotFound
 		}
-		return fmt.Errorf("org: failed to look up organization: %w", err)
+		return nil, fmt.Errorf("org: failed to look up organization: %w", err)
 	}
 
-	inviterUser, err := s.userRepo.FindByID(ctx, inviterUserID)
-	if err != nil {
-		return fmt.Errorf("org: failed to look up inviter: %w", err)
+	if err := s.subscriptionSvc.EnforceUserLimit(ctx, orgID); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().UTC()
 	membership := &model.OrgMembership{
 		UserID:    invitee.ID,
 		OrgID:     orgID,
-		Role:      model.OrgRoleMember,
-		Status:    model.OrgMembershipStatusInvited,
+		Role:      role,
+		Status:    model.OrgMembershipStatusActive,
 		InvitedBy: &inviterUserID,
-		InvitedAt: &now,
+		JoinedAt:  &now,
 	}
 	if err := s.membershipRepo.Create(ctx, membership); err != nil {
-		return fmt.Errorf("org: failed to create invite: %w", err)
+		return nil, fmt.Errorf("org: failed to create membership: %w", err)
 	}
 
-	// inviteToken has no separate secret in this design — the "invited"
-	// membership row itself (gated by the invitee's authenticated session) is
-	// what AcceptInvite checks — so the org ID doubles as the link parameter.
-	if err := s.emailService.SendOrgInvite(ctx, invitee.Email, org.Name, inviterUser.Name, orgID.String()); err != nil {
-		log.Printf("org: failed to send invite email to %s: %v", invitee.Email, err)
-	}
-
-	return nil
+	return membership, nil
 }
 
 // AcceptInvite activates a pending invite for userID in orgID.

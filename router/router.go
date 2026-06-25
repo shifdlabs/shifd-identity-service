@@ -20,6 +20,7 @@ func New(
 	jwksHandler *handler.JWKSHandler,
 	orgHandler *handler.OrgHandler,
 	adminHandler *handler.AdminHandler,
+	userHandler *handler.UserHandler,
 	publicKey *rsa.PublicKey,
 	userRepo *repository.UserRepository,
 ) *gin.Engine {
@@ -57,6 +58,14 @@ func New(
 			auth.POST("/reset-password", authHandler.ResetPassword)
 		}
 
+		me := api.Group("/me", requireAuth)
+		{
+			me.GET("", userHandler.GetMe)
+			me.PATCH("", userHandler.UpdateMe)
+			me.PATCH("/password", userHandler.ChangePassword)
+			me.GET("/orgs", userHandler.ListMyOrgs)
+		}
+
 		orgs := api.Group("/orgs", requireAuth)
 		{
 			orgs.POST("", orgHandler.CreateOrg)
@@ -74,6 +83,7 @@ func New(
 			admin.GET("/orgs", adminHandler.ListOrgs)
 			admin.POST("/orgs", adminHandler.CreateOrg)
 			admin.GET("/orgs/:org_id", adminHandler.GetOrg)
+			admin.POST("/orgs/:org_id/members", adminHandler.AddMember)
 			admin.POST("/orgs/:org_id/subscriptions", adminHandler.CreateSubscription)
 			admin.PATCH("/orgs/:org_id/subscriptions/:sub_id", adminHandler.UpdateSubscription)
 			admin.GET("/users", adminHandler.ListUsers)

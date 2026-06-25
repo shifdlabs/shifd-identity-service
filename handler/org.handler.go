@@ -32,6 +32,7 @@ type createOrgRequest struct {
 
 type inviteMemberRequest struct {
 	Email string `json:"email" binding:"required,email"`
+	Role  string `json:"role"`
 }
 
 type updateMemberRequest struct {
@@ -123,15 +124,22 @@ func (h *OrgHandler) InviteMember(c *gin.Context) {
 		return
 	}
 
-	err := h.orgService.InviteMember(c.Request.Context(), orgID, userID, req.Email)
+	membership, err := h.orgService.InviteMember(c.Request.Context(), orgID, userID, req.Email, req.Role)
 	if err != nil {
+		var limitErr *service.UserLimitReachedError
 		switch {
+		case errors.As(err, &limitErr):
+			respondUserLimitReached(c, limitErr)
+		case errors.Is(err, service.ErrNoActiveSubscription):
+			respondError(c, http.StatusForbidden, "SUBSCRIPTION_INACTIVE", "No active subscription found")
+		case errors.Is(err, service.ErrInvalidRole):
+			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrInsufficientPermissions):
 			respondError(c, http.StatusForbidden, "FORBIDDEN", err.Error())
 		case errors.Is(err, service.ErrUserNotFound):
-			respondError(c, http.StatusNotFound, "NOT_FOUND", "No user found with that email")
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "User dengan email ini belum terdaftar di SIS. Minta mereka mendaftar terlebih dahulu.")
 		case errors.Is(err, service.ErrAlreadyMember):
-			respondError(c, http.StatusConflict, "ALREADY_MEMBER", err.Error())
+			respondError(c, http.StatusConflict, "ALREADY_MEMBER", "User ini sudah menjadi member aktif di organisasi ini.")
 		case errors.Is(err, service.ErrOrgNotFound):
 			respondError(c, http.StatusNotFound, "NOT_FOUND", "Organization not found")
 		default:
@@ -141,7 +149,7 @@ func (h *OrgHandler) InviteMember(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": nil, "message": "invite sent"})
+	c.JSON(http.StatusCreated, gin.H{"data": toMembershipResponse(membership), "message": "success"})
 }
 
 // AcceptInvite handles POST /api/orgs/:org_id/members/accept.

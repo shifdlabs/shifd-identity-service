@@ -16,27 +16,64 @@ import (
 var (
 	ErrSubscriptionNotFound      = errors.New("subscription not found")
 	ErrInvalidSubscriptionStatus = errors.New("status must be one of: pending, active, expired, cancelled, suspended")
+	ErrNoActiveSubscription      = errors.New("no active subscription found")
 )
+
+// UserLimitReachedError indicates an org's active member count has already
+// reached its subscription's user_limit seat cap.
+type UserLimitReachedError struct {
+	Current int
+	Limit   int
+}
+
+func (e *UserLimitReachedError) Error() string {
+	return fmt.Sprintf("user limit reached: %d/%d active members", e.Current, e.Limit)
+}
 
 // SubscriptionService implements subscription CRUD and the active-product
 // lookup used to populate the JWT "products" claim.
 type SubscriptionService struct {
 	subscriptionRepo *repository.SubscriptionRepository
+	membershipRepo   *repository.OrgMembershipRepository
 }
 
-func NewSubscriptionService(subscriptionRepo *repository.SubscriptionRepository) *SubscriptionService {
-	return &SubscriptionService{subscriptionRepo: subscriptionRepo}
+func NewSubscriptionService(subscriptionRepo *repository.SubscriptionRepository, membershipRepo *repository.OrgMembershipRepository) *SubscriptionService {
+	return &SubscriptionService{subscriptionRepo: subscriptionRepo, membershipRepo: membershipRepo}
+}
+
+// defaultUserLimitForPlan returns the default seat limit for a plan, or nil
+// for plans with no limit (e.g. large_enterprise).
+func defaultUserLimitForPlan(plan string) *int {
+	limit := func(n int) *int { return &n }
+	switch plan {
+	case model.SubscriptionPlanStandard:
+		return limit(50)
+	case model.SubscriptionPlanProfessional:
+		return limit(200)
+	case model.SubscriptionPlanEnterprise:
+		return limit(1000)
+	case model.SubscriptionPlanLargeEnterprise:
+		return nil
+	default:
+		return nil
+	}
 }
 
 // CreateSubscription creates a new subscription for orgID, always starting
 // in "active" status per the platform admin subscription-creation flow.
-func (s *SubscriptionService) CreateSubscription(ctx context.Context, orgID uuid.UUID, productID, plan string, expiresAt time.Time) (*model.Subscription, error) {
+// userLimit overrides the plan's default seat limit when non-nil.
+func (s *SubscriptionService) CreateSubscription(ctx context.Context, orgID uuid.UUID, productID, plan string, expiresAt time.Time, userLimit *int) (*model.Subscription, error) {
+	if userLimit == nil {
+		userLimit = defaultUserLimitForPlan(plan)
+	}
+
 	sub := &model.Subscription{
 		OrgID:     orgID,
 		ProductID: productID,
 		Plan:      plan,
 		Status:    model.SubscriptionStatusActive,
 		ExpiresAt: expiresAt,
+		UserLimit: userLimit,
 	}
 
 	if err := s.subscriptionRepo.Create(ctx, sub); err != nil {
@@ -98,23 +135,52 @@ func (s *SubscriptionService) ListByOrg(ctx context.Context, orgID uuid.UUID) ([
 	return subs, nil
 }
 
-// GetActiveProductsForOrg returns the product_id of every ACTIVE, non-expired
-// subscription for orgID. AuthService.Login/Refresh use this to populate the
-// JWT "products" claim per the CLAUDE.md JWT Claims Structure.
-func (s *SubscriptionService) GetActiveProductsForOrg(ctx context.Context, orgID uuid.UUID) ([]string, error) {
+// ListActiveByOrg returns the ACTIVE, non-expired subscriptions for orgID.
+// This is the single definition of "active subscription" reused by the
+// products claim and by the per-org views.
+func (s *SubscriptionService) ListActiveByOrg(ctx context.Context, orgID uuid.UUID) ([]model.Subscription, error) {
 	subs, err := s.subscriptionRepo.FindAllByOrgID(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("subscription: failed to list subscriptions: %w", err)
 	}
 
 	now := time.Now().UTC()
-	products := make([]string, 0, len(subs))
+	active := make([]model.Subscription, 0, len(subs))
 	for _, sub := range subs {
 		if sub.Status == model.SubscriptionStatusActive && sub.ExpiresAt.After(now) {
-			products = append(products, sub.ProductID)
+			active = append(active, sub)
 		}
 	}
-	return products, nil
+	return active, nil
+}
+
+// EnforceUserLimit checks whether orgID can add one more active member under
+// its current shifd-approval subscription. It returns ErrNoActiveSubscription
+// if orgID has no active subscription for that product, or a
+// *UserLimitReachedError if the subscription has a seat cap (UserLimit) that
+// orgID's active member count has already reached. A nil UserLimit
+// (unlimited) always passes. Callers should run this immediately before
+// creating the new org_membership row.
+func (s *SubscriptionService) EnforceUserLimit(ctx context.Context, orgID uuid.UUID) error {
+	sub, err := s.GetActiveSubscription(ctx, orgID, model.ProductShifdApproval)
+	if err != nil {
+		return err
+	}
+	if sub == nil {
+		return ErrNoActiveSubscription
+	}
+	if sub.UserLimit == nil {
+		return nil
+	}
+
+	count, err := s.membershipRepo.CountActiveByOrgID(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("subscription: failed to count active members: %w", err)
+	}
+	if count >= int64(*sub.UserLimit) {
+		return &UserLimitReachedError{Current: int(count), Limit: *sub.UserLimit}
+	}
+	return nil
 }
 
 func isValidSubscriptionStatus(status string) bool {

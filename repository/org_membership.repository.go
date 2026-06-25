@@ -47,6 +47,20 @@ func (r *OrgMembershipRepository) FindAllByUserID(ctx context.Context, userID uu
 	return memberships, nil
 }
 
+// CountActiveByOrgID returns the number of ACTIVE memberships in orgID, used
+// to enforce a subscription's user_limit seat cap.
+func (r *OrgMembershipRepository) CountActiveByOrgID(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&model.OrgMembership{}).
+		Where("org_id = ? AND status = ?", orgID, model.OrgMembershipStatusActive).
+		Count(&count).Error
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (r *OrgMembershipRepository) Update(ctx context.Context, membership *model.OrgMembership) error {
 	return r.db.WithContext(ctx).Save(membership).Error
 }
