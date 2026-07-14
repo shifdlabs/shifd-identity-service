@@ -15,9 +15,10 @@ import (
 const claimsContextKey = "claims"
 
 // RequireAuth returns middleware that validates the Bearer JWT in the
-// Authorization header using the RSA public key. On success the parsed claims
-// are stored in the Gin context; on any failure it aborts with 401.
-func RequireAuth(publicKey *rsa.PublicKey) gin.HandlerFunc {
+// Authorization header using the RSA public key, verifying the token's issuer
+// matches issuer. On success the parsed claims are stored in the Gin context;
+// on any failure it aborts with 401.
+func RequireAuth(publicKey *rsa.PublicKey, issuer string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
 		if authHeader == "" {
@@ -37,7 +38,7 @@ func RequireAuth(publicKey *rsa.PublicKey) gin.HandlerFunc {
 			return
 		}
 
-		claims, err := jwtutil.ParseToken(tokenString, publicKey)
+		claims, err := jwtutil.ParseToken(tokenString, publicKey, issuer)
 		if err != nil {
 			respondUnauthorized(c)
 			return

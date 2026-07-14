@@ -73,11 +73,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrEmailAlreadyExists):
 			respondError(c, http.StatusConflict, "EMAIL_ALREADY_EXISTS", "An account with that email already exists")
-		case errors.Is(err, service.ErrInvalidEmail), errors.Is(err, service.ErrPasswordTooShort):
+		case errors.Is(err, service.ErrInvalidEmail), errors.Is(err, service.ErrPasswordTooShort), errors.Is(err, service.ErrPasswordTooLong):
 			// These sentinels carry safe, user-facing validation messages.
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		default:
-			log.Printf("handler: register error for %s: %v", req.Email, err)
+			log.Printf("handler: register error for %s: %v", service.MaskEmail(req.Email), err)
 			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
 		}
 		return
@@ -104,7 +104,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		orgID = &parsed
 	}
 
-	result, err := h.authService.Login(c.Request.Context(), req.Email, req.Password, orgID, req.DeviceInfo)
+	result, err := h.authService.Login(c.Request.Context(), req.Email, req.Password, orgID, req.DeviceInfo, c.ClientIP())
 	if err != nil {
 		var lockedErr *service.AccountLockedError
 		switch {
@@ -115,7 +115,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		case errors.Is(err, service.ErrForbidden):
 			respondError(c, http.StatusForbidden, "FORBIDDEN", "You do not have access to the requested organization")
 		default:
-			log.Printf("handler: login error for %s: %v", req.Email, err)
+			log.Printf("handler: login error for %s: %v", service.MaskEmail(req.Email), err)
 			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
 		}
 		return
@@ -205,7 +205,7 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	err := h.authService.ResetPassword(c.Request.Context(), req.Token, req.NewPassword)
 	if err != nil {
 		switch {
-		case errors.Is(err, service.ErrPasswordTooShort):
+		case errors.Is(err, service.ErrPasswordTooShort), errors.Is(err, service.ErrPasswordTooLong):
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		case errors.Is(err, service.ErrTokenExpired):
 			respondError(c, http.StatusUnauthorized, "TOKEN_EXPIRED", "Reset token has expired")

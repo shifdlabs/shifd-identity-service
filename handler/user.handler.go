@@ -114,7 +114,7 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrInvalidCredentials):
 			respondError(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Current password is incorrect")
-		case errors.Is(err, service.ErrPasswordTooShort):
+		case errors.Is(err, service.ErrPasswordTooShort), errors.Is(err, service.ErrPasswordTooLong):
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		case errors.Is(err, service.ErrUserNotFound):
 			respondError(c, http.StatusNotFound, "NOT_FOUND", "User not found")

@@ -2,6 +2,7 @@ package router
 
 import (
 	"crypto/rsa"
+	"log"
 	"net/http"
 
 	"github.com/ShifdLabs/shifd-identity-service/config"
@@ -10,6 +11,19 @@ import (
 	"github.com/ShifdLabs/shifd-identity-service/repository"
 	"github.com/gin-gonic/gin"
 )
+
+// registerAuthenticatedRateLimitPerMin is the per-IP limit applied to
+// POST /api/auth/register when the caller presents a Bearer token that
+// verifies (see middleware.RateLimitRegisterPerMinute) — e.g. an org admin
+// bulk-importing new users. Anonymous public registration keeps the stricter
+// cfg.RateLimitAuthPerMin limit.
+const registerAuthenticatedRateLimitPerMin = 60
+
+// tokenEndpointRateLimitPerMin is the per-IP limit for POST /api/auth/refresh
+// and /api/auth/logout. Both are public and hit the DB on every call, so they
+// need a ceiling — but a generous one, since many legitimate sessions can sit
+// behind one NAT'd IP each refreshing every 15 minutes.
+const tokenEndpointRateLimitPerMin = 60
 
 // New builds the Gin engine with all routes and middleware wired together.
 // publicKey is used by the auth middleware to validate Bearer JWTs locally;
@@ -29,6 +43,16 @@ func New(
 	}
 
 	engine := gin.Default()
+
+	// Trust only the explicitly configured proxies so c.ClientIP() cannot be
+	// spoofed via X-Forwarded-For/X-Real-IP. An empty list => trust none, and
+	// ClientIP() falls back to the connection RemoteAddr.
+	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("router: failed to set trusted proxies: %v", err)
+	}
+
+	engine.Use(middleware.SecurityHeaders(cfg.AppEnv == "production"))
+	engine.Use(middleware.BodyLimit(middleware.MaxRequestBodyBytes))
 	engine.Use(middleware.CORS(cfg.CORSAllowedOrigins))
 
 	engine.GET("/health", func(c *gin.Context) {
@@ -39,7 +63,20 @@ func New(
 	engine.GET("/.well-known/jwks.json", jwksHandler.JWKS)
 
 	authRateLimiter := middleware.RateLimitPerMinute(cfg.RateLimitAuthPerMin)
-	requireAuth := middleware.RequireAuth(publicKey)
+	// forgot-password / reset-password get their own per-IP limiter (separate
+	// budget from login) to curb email bombing and reset-token hammering.
+	passwordResetRateLimiter := middleware.RateLimitPerMinute(cfg.RateLimitAuthPerMin)
+	// Register gets a separate limiter: callers with a verified Bearer token
+	// (e.g. an org admin doing a bulk import) are held to a higher per-minute
+	// budget than anonymous public signups.
+	registerRateLimiter := middleware.RateLimitRegisterPerMinute(cfg.RateLimitAuthPerMin, registerAuthenticatedRateLimitPerMin, publicKey, cfg.JWTIssuer)
+	// refresh/logout share one per-IP budget: public endpoints that cost a DB
+	// query per call must not be free to hammer.
+	tokenRateLimiter := middleware.RateLimitPerMinute(tokenEndpointRateLimitPerMin)
+	// Change-password verifies current_password with bcrypt; without a limiter a
+	// stolen (still-valid) access token could brute-force the current password.
+	passwordChangeRateLimiter := middleware.RateLimitPerMinute(cfg.RateLimitAuthPerMin)
+	requireAuth := middleware.RequireAuth(publicKey, cfg.JWTIssuer)
 	requireAdmin := middleware.RequireAdmin(userRepo)
 
 	api := engine.Group("/api")
@@ -50,19 +87,19 @@ func New(
 			// Logout is public too: the refresh token itself is the credential,
 			// validated against the DB by hash in AuthService.Logout — no
 			// Authorization header is required.
-			auth.POST("/register", authRateLimiter, authHandler.Register)
+			auth.POST("/register", registerRateLimiter, authHandler.Register)
 			auth.POST("/login", authRateLimiter, authHandler.Login)
-			auth.POST("/refresh", authHandler.Refresh)
-			auth.POST("/logout", authHandler.Logout)
-			auth.POST("/forgot-password", authHandler.ForgotPassword)
-			auth.POST("/reset-password", authHandler.ResetPassword)
+			auth.POST("/refresh", tokenRateLimiter, authHandler.Refresh)
+			auth.POST("/logout", tokenRateLimiter, authHandler.Logout)
+			auth.POST("/forgot-password", passwordResetRateLimiter, authHandler.ForgotPassword)
+			auth.POST("/reset-password", passwordResetRateLimiter, authHandler.ResetPassword)
 		}
 
 		me := api.Group("/me", requireAuth)
 		{
 			me.GET("", userHandler.GetMe)
 			me.PATCH("", userHandler.UpdateMe)
-			me.PATCH("/password", userHandler.ChangePassword)
+			me.PATCH("/password", passwordChangeRateLimiter, userHandler.ChangePassword)
 			me.GET("/orgs", userHandler.ListMyOrgs)
 		}
 

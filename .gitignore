@@ -2,8 +2,12 @@
 app.env
 .env
 
-# Docs — jangan pernah commit file ini
+# Docs — ignore ad-hoc notes by default, but keep the important docs tracked
 *.md
+!CLAUDE.md
+!API.md
+!AUDIT_RESULT.MD
+!README.md
 
 # RSA keys — generate locally, jangan commit
 *.pem

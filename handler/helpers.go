@@ -12,7 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const defaultPageLimit = 20
+const (
+	defaultPageLimit = 20
+	// maxPageLimit caps ?limit= so one request cannot pull an unbounded number
+	// of rows into memory.
+	maxPageLimit = 100
+)
 
 // ---------------------------------------------------------------------------
 // Request parsing helpers shared across handlers
@@ -49,6 +54,7 @@ func pathUUID(c *gin.Context, name string) (uuid.UUID, bool) {
 
 // queryPagination parses page/limit query params, defaulting to 1/defaultLimit
 // and falling back to the default for non-positive or unparseable values.
+// limit is clamped to maxPageLimit.
 func queryPagination(c *gin.Context, defaultLimit int) (page, limit int) {
 	page = 1
 	if raw := c.Query("page"); raw != "" {
@@ -61,6 +67,9 @@ func queryPagination(c *gin.Context, defaultLimit int) (page, limit int) {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit > maxPageLimit {
+		limit = maxPageLimit
 	}
 	return page, limit
 }

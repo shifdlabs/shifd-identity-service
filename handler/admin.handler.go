@@ -185,8 +185,13 @@ func (h *AdminHandler) CreateSubscription(c *gin.Context) {
 
 	sub, err := h.subscriptionService.CreateSubscription(c.Request.Context(), orgID, req.ProductID, req.Plan, req.ExpiresAt, req.UserLimit)
 	if err != nil {
-		log.Printf("handler: admin create subscription error: %v", err)
-		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		switch {
+		case errors.Is(err, service.ErrInvalidProduct), errors.Is(err, service.ErrInvalidPlan), errors.Is(err, service.ErrExpiresInPast):
+			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		default:
+			log.Printf("handler: admin create subscription error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
 		return
 	}
 
@@ -217,7 +222,7 @@ func (h *AdminHandler) UpdateSubscription(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrSubscriptionNotFound):
 			respondError(c, http.StatusNotFound, "NOT_FOUND", "Subscription not found")
-		case errors.Is(err, service.ErrInvalidSubscriptionStatus):
+		case errors.Is(err, service.ErrInvalidSubscriptionStatus), errors.Is(err, service.ErrInvalidPlan):
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		default:
 			log.Printf("handler: admin update subscription error: %v", err)

@@ -16,6 +16,9 @@ import (
 var (
 	ErrSubscriptionNotFound      = errors.New("subscription not found")
 	ErrInvalidSubscriptionStatus = errors.New("status must be one of: pending, active, expired, cancelled, suspended")
+	ErrInvalidProduct            = errors.New("product_id must be one of the supported products")
+	ErrInvalidPlan               = errors.New("plan must be one of: standard, professional, enterprise, large_enterprise")
+	ErrExpiresInPast             = errors.New("expires_at must be in the future")
 	ErrNoActiveSubscription      = errors.New("no active subscription found")
 )
 
@@ -63,6 +66,16 @@ func defaultUserLimitForPlan(plan string) *int {
 // in "active" status per the platform admin subscription-creation flow.
 // userLimit overrides the plan's default seat limit when non-nil.
 func (s *SubscriptionService) CreateSubscription(ctx context.Context, orgID uuid.UUID, productID, plan string, expiresAt time.Time, userLimit *int) (*model.Subscription, error) {
+	if !isValidProduct(productID) {
+		return nil, ErrInvalidProduct
+	}
+	if !isValidPlan(plan) {
+		return nil, ErrInvalidPlan
+	}
+	if !expiresAt.After(time.Now().UTC()) {
+		return nil, ErrExpiresInPast
+	}
+
 	if userLimit == nil {
 		userLimit = defaultUserLimitForPlan(plan)
 	}
@@ -116,6 +129,9 @@ func (s *SubscriptionService) UpdateSubscription(ctx context.Context, subID uuid
 		sub.ExpiresAt = expiresAt
 	}
 	if plan != "" {
+		if !isValidPlan(plan) {
+			return nil, ErrInvalidPlan
+		}
 		sub.Plan = plan
 	}
 	sub.UpdatedAt = time.Now().UTC()
@@ -187,6 +203,27 @@ func isValidSubscriptionStatus(status string) bool {
 	switch status {
 	case model.SubscriptionStatusPending, model.SubscriptionStatusActive, model.SubscriptionStatusExpired,
 		model.SubscriptionStatusCancelled, model.SubscriptionStatusSuspended:
+		return true
+	default:
+		return false
+	}
+}
+
+// isValidProduct reports whether productID is a product SIS knows about. Only
+// known products can be matched by seat-limit enforcement downstream.
+func isValidProduct(productID string) bool {
+	switch productID {
+	case model.ProductShifdApproval:
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidPlan(plan string) bool {
+	switch plan {
+	case model.SubscriptionPlanStandard, model.SubscriptionPlanProfessional,
+		model.SubscriptionPlanEnterprise, model.SubscriptionPlanLargeEnterprise:
 		return true
 	default:
 		return false

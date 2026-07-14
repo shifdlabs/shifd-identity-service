@@ -111,10 +111,20 @@ func GenerateAccessToken(privateKey *rsa.PrivateKey, keyID string, issuer string
 }
 
 // ParseToken validates the RS256 signature and standard claims (including
-// expiry) of tokenString and returns its claims.
-func ParseToken(tokenString string, publicKey *rsa.PublicKey) (jwt.MapClaims, error) {
+// expiry) of tokenString and returns its claims. When issuer is non-empty the
+// token's "iss" claim must match it, and only RS256 is accepted as the signing
+// method (belt-and-suspenders against algorithm confusion).
+func ParseToken(tokenString string, publicKey *rsa.PublicKey, issuer string) (jwt.MapClaims, error) {
 	if publicKey == nil {
 		return nil, errors.New("jwtutil: public key is nil")
+	}
+
+	// WithExpirationRequired: a token missing "exp" would otherwise skip expiry
+	// validation entirely; every SIS token carries one, so absence means forgery
+	// or corruption.
+	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256"}), jwt.WithExpirationRequired()}
+	if issuer != "" {
+		opts = append(opts, jwt.WithIssuer(issuer))
 	}
 
 	claims := jwt.MapClaims{}
@@ -123,7 +133,7 @@ func ParseToken(tokenString string, publicKey *rsa.PublicKey) (jwt.MapClaims, er
 			return nil, fmt.Errorf("jwtutil: unexpected signing method: %v", t.Header["alg"])
 		}
 		return publicKey, nil
-	})
+	}, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("jwtutil: failed to parse token: %w", err)
 	}

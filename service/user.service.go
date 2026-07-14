@@ -111,8 +111,8 @@ func (s *UserService) ChangePassword(ctx context.Context, userID uuid.UUID, curr
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
 		return ErrInvalidCredentials
 	}
-	if len(newPassword) < minPasswordLength {
-		return ErrPasswordTooShort
+	if err := validatePasswordLength(newPassword); err != nil {
+		return err
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)

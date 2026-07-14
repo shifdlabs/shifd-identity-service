@@ -49,12 +49,19 @@ type Config struct {
 	// Security
 	MaxFailedLogins            int
 	AccountLockDurationMinutes int
+	FailedLoginWindowMinutes   int
 	RateLimitAuthPerMin        int
 	CORSAllowedOrigins         []string
+	TrustedProxies             []string
 
 	// Platform admin
 	PlatformAdminEmails []string
 }
+
+// defaultFailedLoginWindowMinutes is the rolling window over which consecutive
+// failed login attempts are counted toward the account lockout threshold when
+// FAILED_LOGIN_WINDOW_MINUTES is not set.
+const defaultFailedLoginWindowMinutes = 15
 
 // requiredEnvVars are the variables documented in CLAUDE.md's
 // "Environment Variables" section. The app refuses to start without them.
@@ -108,8 +115,13 @@ func Load() *Config {
 
 		MaxFailedLogins:            mustParseInt("MAX_FAILED_LOGINS"),
 		AccountLockDurationMinutes: mustParseInt("ACCOUNT_LOCK_DURATION_MINUTES"),
+		FailedLoginWindowMinutes:   parseIntWithDefault("FAILED_LOGIN_WINDOW_MINUTES", defaultFailedLoginWindowMinutes),
 		RateLimitAuthPerMin:        mustParseInt("RATE_LIMIT_AUTH_PER_MIN"),
 		CORSAllowedOrigins:         splitAndTrim(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		// TRUSTED_PROXIES is optional. When empty, the router trusts no proxy and
+		// derives the client IP from the connection's RemoteAddr, so X-Forwarded-For
+		// spoofing cannot defeat per-IP rate limiting / account lockout.
+		TrustedProxies: splitAndTrim(os.Getenv("TRUSTED_PROXIES")),
 
 		PlatformAdminEmails: splitAndTrim(os.Getenv("PLATFORM_ADMIN_EMAILS")),
 	}
@@ -127,6 +139,20 @@ func missingEnvVars() []string {
 
 func mustParseInt(key string) int {
 	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil {
+		panic(fmt.Sprintf("config: environment variable %s must be an integer: %v", key, err))
+	}
+	return value
+}
+
+// parseIntWithDefault parses an optional integer env var, returning fallback
+// when it is unset/blank and panicking only when it is set to a non-integer.
+func parseIntWithDefault(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
 	if err != nil {
 		panic(fmt.Sprintf("config: environment variable %s must be an integer: %v", key, err))
 	}

@@ -23,11 +23,33 @@ import (
 )
 
 const (
-	bcryptCost              = 12
-	minPasswordLength       = 8
+	bcryptCost        = 12
+	minPasswordLength = 8
+	// maxPasswordLength caps passwords at bcrypt's 72-byte input limit. bcrypt
+	// silently truncates beyond 72 bytes, so anything longer would have unused
+	// entropy and a misleading sense of strength — reject it explicitly.
+	maxPasswordLength       = 72
 	passwordResetTokenBytes = 32
 	passwordResetTokenTTL   = time.Hour
+	// maxActivePasswordResetTokens caps how many unused, unexpired reset tokens
+	// one account can hold, throttling reset-email sends per account so a victim
+	// cannot be email-bombed from many IPs (per-IP rate limiting alone can't
+	// stop a distributed attacker).
+	maxActivePasswordResetTokens = 3
 )
+
+// dummyPasswordHash is a real bcrypt hash used to run a comparison of
+// equivalent cost when a login is attempted for a non-existent email, so the
+// response time does not reveal whether the email is registered.
+var dummyPasswordHash = mustGenerateDummyHash()
+
+func mustGenerateDummyHash() string {
+	hash, err := bcrypt.GenerateFromPassword([]byte("shifd-timing-equalizer"), bcryptCost)
+	if err != nil {
+		panic(fmt.Sprintf("auth: failed to generate dummy password hash: %v", err))
+	}
+	return string(hash)
+}
 
 // Sentinel errors returned by AuthService. Handlers map these to the
 // SNAKE_CASE error codes and HTTP statuses defined in CLAUDE.md.
@@ -36,6 +58,7 @@ var (
 	ErrEmailAlreadyExists = errors.New("email already registered")
 	ErrInvalidEmail       = errors.New("invalid email format")
 	ErrPasswordTooShort   = errors.New("password must be at least 8 characters")
+	ErrPasswordTooLong    = errors.New("password must be at most 72 bytes")
 	ErrTokenExpired       = errors.New("token has expired")
 	ErrTokenInvalid       = errors.New("token is invalid")
 	ErrForbidden          = errors.New("not an active member of this organization")
@@ -103,8 +126,8 @@ func (s *AuthService) Register(ctx context.Context, email, password, name, phone
 	if _, err := mail.ParseAddress(normalizedEmail); err != nil {
 		return nil, ErrInvalidEmail
 	}
-	if len(password) < minPasswordLength {
-		return nil, ErrPasswordTooShort
+	if err := validatePasswordLength(password); err != nil {
+		return nil, err
 	}
 
 	if _, err := s.userRepo.FindByEmail(ctx, normalizedEmail); err == nil {
@@ -129,6 +152,11 @@ func (s *AuthService) Register(ctx context.Context, email, password, name, phone
 	}
 
 	if err := s.userRepo.Create(ctx, user); err != nil {
+		// Map a lost check-then-create race (unique_violation on email) to the
+		// same 409 the pre-check returns, instead of leaking it as a 500.
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return nil, ErrEmailAlreadyExists
+		}
 		return nil, fmt.Errorf("auth: failed to create user: %w", err)
 	}
 
@@ -138,23 +166,27 @@ func (s *AuthService) Register(ctx context.Context, email, password, name, phone
 // Login authenticates a user and issues a new access/refresh token pair.
 // orgID is optional: if nil, the user's first active org membership (if any)
 // is used as the token's org context.
-func (s *AuthService) Login(ctx context.Context, email, password string, orgID *uuid.UUID, deviceInfo string) (*LoginResult, error) {
+func (s *AuthService) Login(ctx context.Context, email, password string, orgID *uuid.UUID, deviceInfo, ipAddress string) (*LoginResult, error) {
 	normalizedEmail := normalizeEmail(email)
 
 	user, err := s.userRepo.FindByEmail(ctx, normalizedEmail)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Run a dummy bcrypt comparison so the response time matches the
+			// "user exists" path and cannot be used to enumerate valid emails.
+			_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 			return nil, ErrInvalidCredentials
 		}
 		return nil, fmt.Errorf("auth: failed to look up user: %w", err)
 	}
 
 	if user.IsLocked {
-		if user.LockTimestamp == nil || time.Since(*user.LockTimestamp) < time.Duration(s.cfg.AccountLockDurationMinutes)*time.Minute {
+		if s.isLockActive(user) {
 			return nil, &AccountLockedError{LockTimestamp: user.LockTimestamp}
 		}
 
-		// Lock duration has elapsed: auto-unlock and let the attempt proceed.
+		// Lock duration has elapsed (or the lock carries no timestamp):
+		// auto-unlock and let the attempt proceed.
 		user.IsLocked = false
 		user.LockTimestamp = nil
 		if err := s.userRepo.Update(ctx, user); err != nil {
@@ -166,7 +198,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return nil, s.handleFailedLogin(ctx, user)
+		return nil, s.handleFailedLogin(ctx, user, ipAddress)
 	}
 
 	if err := s.userRepo.ResetFailedLogins(ctx, normalizedEmail); err != nil {
@@ -196,14 +228,17 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 	}, nil
 }
 
-// handleFailedLogin records a failed password attempt and locks the account
-// once MaxFailedLogins is reached, returning the error the caller should surface.
-func (s *AuthService) handleFailedLogin(ctx context.Context, user *model.User) error {
-	if err := s.userRepo.IncrementFailedLogins(ctx, user.Email, ""); err != nil {
+// handleFailedLogin records a failed password attempt (with the client IP) and
+// locks the account once MaxFailedLogins failures accumulate within the
+// configured rolling window, returning the error the caller should surface.
+func (s *AuthService) handleFailedLogin(ctx context.Context, user *model.User, ipAddress string) error {
+	if err := s.userRepo.IncrementFailedLogins(ctx, user.Email, ipAddress); err != nil {
 		return fmt.Errorf("auth: failed to record failed login: %w", err)
 	}
 
-	count, err := s.userRepo.CountRecentFailedLogins(ctx, user.Email, time.Time{})
+	window := time.Duration(s.cfg.FailedLoginWindowMinutes) * time.Minute
+	since := time.Now().UTC().Add(-window)
+	count, err := s.userRepo.CountRecentFailedLogins(ctx, user.Email, since)
 	if err != nil {
 		return fmt.Errorf("auth: failed to count failed logins: %w", err)
 	}
@@ -219,7 +254,26 @@ func (s *AuthService) handleFailedLogin(ctx context.Context, user *model.User) e
 		return fmt.Errorf("auth: failed to lock account: %w", err)
 	}
 
+	// Revoke every refresh token so a locked account cannot keep minting access
+	// tokens via /api/auth/refresh until the refresh token naturally expires.
+	if err := s.refreshTokenRepo.RevokeAllByUserID(ctx, user.ID); err != nil {
+		return fmt.Errorf("auth: failed to revoke refresh tokens on lock: %w", err)
+	}
+
 	return &AccountLockedError{LockTimestamp: &now}
+}
+
+// isLockActive reports whether user's account lock is currently in effect. A
+// lock with no timestamp is treated as elapsed (not permanent) so a manually
+// set is_locked flag without lock_timestamp cannot strand an account forever.
+func (s *AuthService) isLockActive(user *model.User) bool {
+	if !user.IsLocked {
+		return false
+	}
+	if user.LockTimestamp == nil {
+		return false
+	}
+	return time.Since(*user.LockTimestamp) < time.Duration(s.cfg.AccountLockDurationMinutes)*time.Minute
 }
 
 // resolveOrgContext picks the org membership (and its active product IDs and
@@ -360,6 +414,12 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (stri
 		return "", fmt.Errorf("auth: failed to look up user: %w", err)
 	}
 
+	// Refuse to mint access tokens for a currently-locked account (defence in
+	// depth alongside revoking refresh tokens at lock time).
+	if s.isLockActive(user) {
+		return "", ErrTokenInvalid
+	}
+
 	// If the org membership bound to this refresh token is no longer active,
 	// degrade gracefully to a token with no org claims rather than failing
 	// the refresh outright.
@@ -399,14 +459,27 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 	user, err := s.userRepo.FindByEmail(ctx, normalizedEmail)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("auth: forgot-password lookup failed for %s: %v", normalizedEmail, err)
+			log.Printf("auth: forgot-password lookup failed for %s: %v", MaskEmail(normalizedEmail), err)
 		}
+		return nil
+	}
+
+	// Per-account throttle: once the account already holds the maximum number
+	// of live reset tokens, silently skip issuing another (same response either
+	// way, so nothing is revealed to the caller).
+	activeTokens, err := s.userRepo.CountActivePasswordResetTokens(ctx, user.ID)
+	if err != nil {
+		log.Printf("auth: failed to count reset tokens for %s: %v", MaskEmail(normalizedEmail), err)
+		return nil
+	}
+	if activeTokens >= maxActivePasswordResetTokens {
+		log.Printf("auth: reset-email throttled for %s (%d active tokens)", MaskEmail(normalizedEmail), activeTokens)
 		return nil
 	}
 
 	rawToken, err := generateSecureToken(passwordResetTokenBytes)
 	if err != nil {
-		log.Printf("auth: failed to generate reset token for %s: %v", normalizedEmail, err)
+		log.Printf("auth: failed to generate reset token for %s: %v", MaskEmail(normalizedEmail), err)
 		return nil
 	}
 
@@ -416,12 +489,12 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 		ExpiresAt: time.Now().UTC().Add(passwordResetTokenTTL),
 	}
 	if err := s.userRepo.CreatePasswordResetToken(ctx, resetToken); err != nil {
-		log.Printf("auth: failed to store reset token for %s: %v", normalizedEmail, err)
+		log.Printf("auth: failed to store reset token for %s: %v", MaskEmail(normalizedEmail), err)
 		return nil
 	}
 
 	if err := s.emailService.SendPasswordReset(ctx, user.Email, user.Name, rawToken); err != nil {
-		log.Printf("auth: failed to send reset email to %s: %v", normalizedEmail, err)
+		log.Printf("auth: failed to send reset email to %s: %v", MaskEmail(normalizedEmail), err)
 	}
 
 	return nil
@@ -431,8 +504,8 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 // password, then revokes every refresh token for the user so all existing
 // sessions are forced to re-authenticate.
 func (s *AuthService) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
-	if len(newPassword) < minPasswordLength {
-		return ErrPasswordTooShort
+	if err := validatePasswordLength(newPassword); err != nil {
+		return err
 	}
 
 	tokenHash := hashToken(rawToken)
@@ -463,12 +536,23 @@ func (s *AuthService) ResetPassword(ctx context.Context, rawToken, newPassword s
 		return fmt.Errorf("auth: failed to hash new password: %w", err)
 	}
 	user.PasswordHash = string(hashedPassword)
+	// A successful reset also clears any brute-force lock: a user who legitimately
+	// reset their password shouldn't have to wait out a lockout to sign in.
+	user.IsLocked = false
+	user.LockTimestamp = nil
 	if err := s.userRepo.Update(ctx, user); err != nil {
 		return fmt.Errorf("auth: failed to update password: %w", err)
 	}
 
-	if err := s.userRepo.MarkPasswordResetTokenUsed(ctx, resetToken.ID); err != nil {
-		return fmt.Errorf("auth: failed to mark reset token used: %w", err)
+	if err := s.userRepo.ResetFailedLogins(ctx, user.Email); err != nil {
+		return fmt.Errorf("auth: failed to reset failed logins: %w", err)
+	}
+
+	// Consume this token AND every other outstanding reset token for the user,
+	// so an older emailed link can no longer change the password after this one
+	// already has.
+	if err := s.userRepo.MarkAllPasswordResetTokensUsed(ctx, user.ID); err != nil {
+		return fmt.Errorf("auth: failed to mark reset tokens used: %w", err)
 	}
 
 	if err := s.refreshTokenRepo.RevokeAllByUserID(ctx, user.ID); err != nil {
@@ -496,6 +580,32 @@ func generateSecureToken(n int) (string, error) {
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// validatePasswordLength enforces the min/max password length. The max exists
+// because bcrypt silently truncates input beyond 72 bytes (see maxPasswordLength).
+func validatePasswordLength(password string) error {
+	if len(password) < minPasswordLength {
+		return ErrPasswordTooShort
+	}
+	if len(password) > maxPasswordLength {
+		return ErrPasswordTooLong
+	}
+	return nil
+}
+
+// MaskEmail redacts an email for logging: "john@company.com" -> "j***@company.com".
+// It keeps the domain (useful for debugging) but hides the local part.
+func MaskEmail(email string) string {
+	at := strings.LastIndex(email, "@")
+	if at <= 0 {
+		return "***"
+	}
+	local, domain := email[:at], email[at:]
+	if len(local) == 1 {
+		return "*" + domain
+	}
+	return local[:1] + "***" + domain
 }
 
 func (s *AuthService) isPlatformAdminEmail(email string) bool {

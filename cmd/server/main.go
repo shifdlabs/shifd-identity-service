@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/ShifdLabs/shifd-identity-service/config"
 	"github.com/ShifdLabs/shifd-identity-service/db"
@@ -12,6 +18,9 @@ import (
 	"github.com/ShifdLabs/shifd-identity-service/router"
 	"github.com/ShifdLabs/shifd-identity-service/service"
 )
+
+// shutdownTimeout bounds how long in-flight requests get to drain on shutdown.
+const shutdownTimeout = 10 * time.Second
 
 func main() {
 	cfg := config.Load()
@@ -84,10 +93,29 @@ func main() {
 	engine := router.New(cfg, authHandler, jwksHandler, orgHandler, adminHandler, userHandler, jwtKeys.Public, userRepo)
 
 	addr := fmt.Sprintf(":%s", cfg.AppPort)
-	log.Printf("main: starting server on %s", addr)
-	if err := engine.Run(addr); err != nil {
-		log.Fatalf("main: server failed: %v", err)
+	srv := &http.Server{Addr: addr, Handler: engine}
+
+	// Run the server in a goroutine so main can wait for a shutdown signal.
+	go func() {
+		log.Printf("main: starting server on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("main: server failed: %v", err)
+		}
+	}()
+
+	// Block until SIGINT/SIGTERM, then drain in-flight requests gracefully.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
+	stop()
+
+	log.Println("main: shutdown signal received, draining connections...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("main: graceful shutdown failed: %v", err)
 	}
+	log.Println("main: server stopped")
 }
 
 // loadJWTKeys loads the RSA key pair used to sign and verify JWTs. It panics

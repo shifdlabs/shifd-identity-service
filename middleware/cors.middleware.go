@@ -16,11 +16,14 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		// Vary on every response (not just allowed ones) so a shared cache never
+		// serves a response with CORS headers to a different origin.
+		c.Header("Vary", "Origin")
+
 		origin := c.GetHeader("Origin")
 		if origin != "" {
 			if _, ok := allowed[origin]; ok {
 				c.Header("Access-Control-Allow-Origin", origin)
-				c.Header("Vary", "Origin")
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 				c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 				c.Header("Access-Control-Allow-Credentials", "true")

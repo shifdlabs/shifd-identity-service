@@ -35,7 +35,7 @@ var (
 	ErrInviteExpired           = errors.New("invite has expired")
 	ErrInsufficientPermissions = errors.New("requires owner or admin role in this organization")
 	ErrCannotRemoveOwner       = errors.New("cannot remove the organization owner")
-	ErrCannotModifyOwner       = errors.New("owner role or status cannot be changed by an admin")
+	ErrCannotModifyOwner       = errors.New("the owner's role or status cannot be changed")
 	ErrInvalidRole             = errors.New(`role must be "admin" or "member"`)
 	ErrInvalidStatus           = errors.New(`status must be "active" or "suspended"`)
 )
@@ -282,8 +282,10 @@ func (s *OrgService) AcceptInvite(ctx context.Context, userID, orgID uuid.UUID) 
 // requesterUserID must be an active owner or admin. role/status may be ""
 // (left unchanged); when set they must be in the admin-manageable subset
 // (role: admin/member; status: active/suspended — "owner" and "invited" are
-// not assignable through this path). An admin (not an owner) may never modify
-// an owner's membership.
+// not assignable through this path). An owner membership can never be modified
+// here — not even by the owner themselves — since demoting or suspending the
+// owner would leave the org ownerless (ownership transfer is out of scope for
+// Phase 1).
 func (s *OrgService) UpdateMember(ctx context.Context, orgID, requesterUserID, targetUserID uuid.UUID, role, status string) error {
 	requester, err := s.getActiveMembership(ctx, requesterUserID, orgID)
 	if err != nil {
@@ -308,7 +310,7 @@ func (s *OrgService) UpdateMember(ctx context.Context, orgID, requesterUserID, t
 		return fmt.Errorf("org: failed to look up target membership: %w", err)
 	}
 
-	if requester.Role == model.OrgRoleAdmin && target.Role == model.OrgRoleOwner {
+	if target.Role == model.OrgRoleOwner {
 		return ErrCannotModifyOwner
 	}
 

@@ -24,6 +24,10 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
+		// Translate driver errors into gorm's typed errors (e.g. a Postgres
+		// unique_violation becomes gorm.ErrDuplicatedKey) so services can map
+		// them precisely instead of leaking them as opaque 500s.
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("db: failed to connect: %w", err)

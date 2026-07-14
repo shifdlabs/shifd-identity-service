@@ -107,6 +107,17 @@ func (r *UserRepository) CreatePasswordResetToken(ctx context.Context, token *mo
 	return r.db.WithContext(ctx).Create(token).Error
 }
 
+// CountActivePasswordResetTokens counts userID's unused, unexpired password
+// reset tokens, used to throttle reset emails per account.
+func (r *UserRepository) CountActivePasswordResetTokens(ctx context.Context, userID uuid.UUID) (int64, error) {
+	var count int64
+	err := r.db.WithContext(ctx).
+		Model(&model.PasswordResetToken{}).
+		Where("user_id = ? AND used_at IS NULL AND expires_at > ?", userID, time.Now().UTC()).
+		Count(&count).Error
+	return count, err
+}
+
 // FindPasswordResetTokenByHash looks up a password reset token by its SHA-256 hash.
 func (r *UserRepository) FindPasswordResetTokenByHash(ctx context.Context, tokenHash string) (*model.PasswordResetToken, error) {
 	var token model.PasswordResetToken
@@ -116,10 +127,12 @@ func (r *UserRepository) FindPasswordResetTokenByHash(ctx context.Context, token
 	return &token, nil
 }
 
-// MarkPasswordResetTokenUsed sets used_at on the given password reset token.
-func (r *UserRepository) MarkPasswordResetTokenUsed(ctx context.Context, id uuid.UUID) error {
+// MarkAllPasswordResetTokensUsed sets used_at on every outstanding reset token
+// for userID. Called after a successful reset so no sibling token issued before
+// it can still change the password.
+func (r *UserRepository) MarkAllPasswordResetTokensUsed(ctx context.Context, userID uuid.UUID) error {
 	return r.db.WithContext(ctx).
 		Model(&model.PasswordResetToken{}).
-		Where("id = ?", id).
+		Where("user_id = ? AND used_at IS NULL", userID).
 		Update("used_at", time.Now().UTC()).Error
 }
