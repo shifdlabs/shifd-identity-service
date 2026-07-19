@@ -8,10 +8,9 @@ import (
 
 // Plan values for Subscription.Plan.
 const (
-	SubscriptionPlanStandard        = "standard"
-	SubscriptionPlanProfessional    = "professional"
-	SubscriptionPlanEnterprise      = "enterprise"
-	SubscriptionPlanLargeEnterprise = "large_enterprise"
+	SubscriptionPlanTrial          = "trial"
+	SubscriptionPlanPremiumMonthly = "premium_monthly"
+	SubscriptionPlanPremiumYearly  = "premium_yearly"
 )
 
 // Status values for Subscription.Status.

@@ -123,6 +123,7 @@ func New(
 			admin.POST("/orgs/:org_id/members", adminHandler.AddMember)
 			admin.POST("/orgs/:org_id/subscriptions", adminHandler.CreateSubscription)
 			admin.PATCH("/orgs/:org_id/subscriptions/:sub_id", adminHandler.UpdateSubscription)
+			admin.POST("/orgs/:org_id/force-logout", adminHandler.ForceLogoutOrg)
 			admin.GET("/users", adminHandler.ListUsers)
 			admin.POST("/users/:uid/force-logout", adminHandler.ForceLogout)
 		}

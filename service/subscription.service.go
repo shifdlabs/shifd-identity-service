@@ -17,7 +17,7 @@ var (
 	ErrSubscriptionNotFound      = errors.New("subscription not found")
 	ErrInvalidSubscriptionStatus = errors.New("status must be one of: pending, active, expired, cancelled, suspended")
 	ErrInvalidProduct            = errors.New("product_id must be one of the supported products")
-	ErrInvalidPlan               = errors.New("plan must be one of: standard, professional, enterprise, large_enterprise")
+	ErrInvalidPlan               = errors.New("plan must be one of: trial, premium_monthly, premium_yearly")
 	ErrExpiresInPast             = errors.New("expires_at must be in the future")
 	ErrNoActiveSubscription      = errors.New("no active subscription found")
 )
@@ -44,19 +44,17 @@ func NewSubscriptionService(subscriptionRepo *repository.SubscriptionRepository,
 	return &SubscriptionService{subscriptionRepo: subscriptionRepo, membershipRepo: membershipRepo}
 }
 
-// defaultUserLimitForPlan returns the default seat limit for a plan, or nil
-// for plans with no limit (e.g. large_enterprise).
+// defaultUserLimitForPlan returns the default seat limit for a plan when the
+// admin does not pass an explicit user_limit at creation time. premium_monthly
+// and premium_yearly are the same tier (billing cadence only differs), so
+// they share the same fallback: unlimited. For contracts with an agreed seat
+// cap (the per-employee billing model — see CLAUDE.md), the admin should pass
+// user_limit explicitly rather than rely on this default.
 func defaultUserLimitForPlan(plan string) *int {
-	limit := func(n int) *int { return &n }
 	switch plan {
-	case model.SubscriptionPlanStandard:
-		return limit(50)
-	case model.SubscriptionPlanProfessional:
-		return limit(200)
-	case model.SubscriptionPlanEnterprise:
-		return limit(1000)
-	case model.SubscriptionPlanLargeEnterprise:
-		return nil
+	case model.SubscriptionPlanTrial:
+		limit := 5
+		return &limit
 	default:
 		return nil
 	}
@@ -222,8 +220,7 @@ func isValidProduct(productID string) bool {
 
 func isValidPlan(plan string) bool {
 	switch plan {
-	case model.SubscriptionPlanStandard, model.SubscriptionPlanProfessional,
-		model.SubscriptionPlanEnterprise, model.SubscriptionPlanLargeEnterprise:
+	case model.SubscriptionPlanTrial, model.SubscriptionPlanPremiumMonthly, model.SubscriptionPlanPremiumYearly:
 		return true
 	default:
 		return false

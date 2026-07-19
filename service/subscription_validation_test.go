@@ -11,10 +11,9 @@ import (
 // fail to match downstream seat-limit enforcement.
 func TestIsValidPlan(t *testing.T) {
 	valid := []string{
-		model.SubscriptionPlanStandard,
-		model.SubscriptionPlanProfessional,
-		model.SubscriptionPlanEnterprise,
-		model.SubscriptionPlanLargeEnterprise,
+		model.SubscriptionPlanTrial,
+		model.SubscriptionPlanPremiumMonthly,
+		model.SubscriptionPlanPremiumYearly,
 	}
 	for _, p := range valid {
 		if !isValidPlan(p) {
@@ -22,7 +21,10 @@ func TestIsValidPlan(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"", "free", "STANDARD", "premium", "unknown"}
+	// Old plan values (standard/professional/enterprise/large_enterprise) must
+	// stay rejected now that the plan set has been replaced — regression guard
+	// against accidentally re-adding them.
+	invalid := []string{"", "free", "STANDARD", "premium", "unknown", "standard", "professional", "enterprise", "large_enterprise"}
 	for _, p := range invalid {
 		if isValidPlan(p) {
 			t.Errorf("isValidPlan(%q) = true, want false", p)

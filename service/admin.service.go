@@ -55,10 +55,13 @@ func NewAdminService(
 	}
 }
 
-// ListOrgs returns a page of organizations ordered newest-first.
-func (s *AdminService) ListOrgs(ctx context.Context, page, limit int) ([]model.Organization, int64, error) {
+// ListOrgs returns a page of organizations ordered newest-first. plan, when
+// non-empty (e.g. "trial"), filters to orgs with an active subscription on
+// that plan — an unrecognized plan value simply yields zero results rather
+// than an error, same as the email search filter on ListUsers.
+func (s *AdminService) ListOrgs(ctx context.Context, page, limit int, plan string) ([]model.Organization, int64, error) {
 	offset, limit := normalizePagination(page, limit)
-	orgs, total, err := s.orgRepo.ListPaginated(ctx, offset, limit)
+	orgs, total, err := s.orgRepo.ListPaginated(ctx, offset, limit, plan)
 	if err != nil {
 		return nil, 0, fmt.Errorf("admin: failed to list organizations: %w", err)
 	}
@@ -184,6 +187,25 @@ func (s *AdminService) ListUsers(ctx context.Context, page, limit int, emailSear
 func (s *AdminService) ForceLogout(ctx context.Context, userID uuid.UUID) error {
 	if err := s.refreshTokenRepo.RevokeAllByUserID(ctx, userID); err != nil {
 		return fmt.Errorf("admin: failed to revoke refresh tokens: %w", err)
+	}
+	return nil
+}
+
+// ForceLogoutOrg revokes every refresh token bound to orgID, ending every
+// active session that currently has access to that org — every member at
+// once, in one call, rather than force-logging-out members one by one.
+// This only kills existing sessions; it does not touch subscription status —
+// pair it with PATCH .../subscriptions/:id (status: suspended/cancelled) if
+// the org should also lose access on its next fresh login.
+func (s *AdminService) ForceLogoutOrg(ctx context.Context, orgID uuid.UUID) error {
+	if _, err := s.orgRepo.FindByID(ctx, orgID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrOrgNotFound
+		}
+		return fmt.Errorf("admin: failed to look up organization: %w", err)
+	}
+	if err := s.refreshTokenRepo.RevokeAllByOrgID(ctx, orgID); err != nil {
+		return fmt.Errorf("admin: failed to revoke org refresh tokens: %w", err)
 	}
 	return nil
 }

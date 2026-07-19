@@ -43,3 +43,15 @@ func (r *RefreshTokenRepository) RevokeAllByUserID(ctx context.Context, userID u
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", time.Now().UTC()).Error
 }
+
+// RevokeAllByOrgID revokes every refresh token bound to orgID's context — a
+// token carries the org it was issued for permanently (set at login, never
+// changed by Refresh), so this revokes exactly the sessions currently able to
+// mint access tokens with orgID's claims, regardless of which member holds
+// them. Sessions bound to a different org (or none) are untouched.
+func (r *RefreshTokenRepository) RevokeAllByOrgID(ctx context.Context, orgID uuid.UUID) error {
+	return r.db.WithContext(ctx).
+		Model(&model.RefreshToken{}).
+		Where("org_id = ? AND revoked_at IS NULL", orgID).
+		Update("revoked_at", time.Now().UTC()).Error
+}

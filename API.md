@@ -299,7 +299,7 @@ Butuh jadi member aktif (role apapun) di org tersebut.
         "id": "cbe53cb8-8dc4-446e-8889-9b7b743e8e23",
         "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
         "product_id": "shifd-approval",
-        "plan": "professional",
+        "plan": "premium_yearly",
         "status": "active",
         "started_at": "2026-01-01T00:00:00Z",
         "expires_at": "2027-01-01T00:00:00Z",
@@ -431,7 +431,7 @@ Butuh member aktif (role apapun). Mengembalikan **semua** subscription org ini a
       "id": "cbe53cb8-8dc4-446e-8889-9b7b743e8e23",
       "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
       "product_id": "shifd-approval",
-      "plan": "professional",
+      "plan": "premium_yearly",
       "status": "active",
       "started_at": "2026-01-01T00:00:00Z",
       "expires_at": "2027-01-01T00:00:00Z",
@@ -532,7 +532,7 @@ List semua org yang user ikuti (semua status membership: active/invited/suspende
           "id": "cbe53cb8-8dc4-446e-8889-9b7b743e8e23",
           "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
           "product_id": "shifd-approval",
-          "plan": "professional",
+          "plan": "premium_yearly",
           "status": "active",
           "started_at": "2026-01-01T00:00:00Z",
           "expires_at": "2027-01-01T00:00:00Z",
@@ -556,7 +556,9 @@ List semua org yang user ikuti (semua status membership: active/invited/suspende
 Semua butuh `Authorization: Bearer <access_token>` **dan** `users.is_platform_admin = true` di DB (di-cek ulang ke DB tiap request, **tidak percaya klaim JWT**). Kalau bukan admin → `403 FORBIDDEN`, pesan `"Platform admin access required"`.
 
 ### `GET /api/admin/orgs`
-Query params: `page` (default `1`), `limit` (default `20`). Value ≤ 0 atau tidak valid otomatis fallback ke default.
+Query params: `page` (default `1`), `limit` (default `20`, di-cap maksimal `100`). Value ≤ 0 atau tidak valid otomatis fallback ke default.
+
+`plan` (opsional) — filter org yang punya subscription **aktif & belum expired** dengan plan tersebut, mis. `?plan=trial` untuk lihat semua org yang lagi trial. Plan yang tidak dikenal (typo dsb.) bukan error, cuma balikin list kosong. Kalau di-omit, semua org ditampilkan (perilaku lama, tidak berubah).
 
 **Response 200**
 ```json
@@ -576,7 +578,7 @@ Query params: `page` (default `1`), `limit` (default `20`). Value ≤ 0 atau tid
   "message": "success"
 }
 ```
-Diurutkan terbaru dulu (`created_at DESC`).
+Diurutkan terbaru dulu (`created_at DESC`). **Catatan:** item di sini **tidak** membawa field `plan`/`expires_at` — itu ada di level subscription, bukan org. Untuk tahu plan & sisa waktu trial per org, buka `GET /api/admin/orgs/:org_id` (lihat catatan FE di bawah).
 
 ---
 
@@ -628,7 +630,7 @@ Beda dengan versi tenant (`GET /api/orgs/:org_id`): admin lihat **semua** member
         "id": "cbe53cb8-8dc4-446e-8889-9b7b743e8e23",
         "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
         "product_id": "shifd-approval",
-        "plan": "professional",
+        "plan": "premium_yearly",
         "status": "active",
         "started_at": "2026-01-01T00:00:00Z",
         "expires_at": "2027-01-01T00:00:00Z",
@@ -683,13 +685,14 @@ Tambah user yang **sudah punya akun SIS** sebagai member org, langsung aktif. Be
 ```json
 {
   "product_id": "shifd-approval",
-  "plan": "professional",
+  "plan": "premium_yearly",
   "expires_at": "2027-06-23T00:00:00Z"
 }
 ```
-- Semua field **wajib**. `expires_at` format ISO8601/RFC3339 (`YYYY-MM-DDTHH:mm:ssZ`).
+- Semua field **wajib** kecuali `user_limit` (opsional). `expires_at` format ISO8601/RFC3339 (`YYYY-MM-DDTHH:mm:ssZ`), harus di masa depan.
 - `status` subscription baru **selalu** `"active"` — tidak bisa diset lewat endpoint ini.
-- ⚠️ `plan` **tidak divalidasi** ke set `standard|professional|enterprise` di server — bebas string apapun akan diterima. Disiplin penamaan plan jadi tanggung jawab FE/admin yang input.
+- `plan` **divalidasi** di server ke enum `trial | premium_monthly | premium_yearly`. Nilai lain → `400 VALIDATION_ERROR`.
+- `user_limit` (integer, opsional) — kalau di-omit, dapat default per plan: `trial` → 5, `premium_monthly`/`premium_yearly` → unlimited (`null`). Untuk kontrak dengan kuota seat tertentu (billing per-employee), isi `user_limit` eksplisit saat create.
 
 **Response 201** — shape subscription sama seperti di atas.
 
@@ -702,16 +705,35 @@ Tambah user yang **sudah punya akun SIS** sebagai member org, langsung aktif. Be
 {
   "status": "suspended",
   "expires_at": "2027-12-31T00:00:00Z",
-  "plan": "enterprise"
+  "plan": "premium_monthly"
 }
 ```
 - `status` valid: `"pending" | "active" | "expired" | "cancelled" | "suspended"`.
 - `expires_at` kalau dikirim, **harus** valid timestamp (tidak bisa kirim string kosong untuk "tidak diubah" — cukup omit field-nya saja dari JSON).
-- `plan` sama seperti create: tidak divalidasi ke enum tertentu.
+- `plan` sama seperti create: divalidasi ke `trial | premium_monthly | premium_yearly`.
 
 **Response 200** — shape subscription terbaru.
 
-**Errors**: `NOT_FOUND` (404, subscription tidak ada), `VALIDATION_ERROR` (400, `status` di luar enum di atas).
+**Errors**: `NOT_FOUND` (404, subscription tidak ada), `VALIDATION_ERROR` (400, `status` atau `plan` di luar enum di atas).
+
+---
+
+### `POST /api/admin/orgs/:org_id/force-logout`
+Revoke **semua** refresh token yang terikat ke org ini sekaligus — versi org dari `POST /api/admin/users/:uid/force-logout` di bawah, tapi untuk seluruh member org dalam satu panggilan (tidak perlu loop per user_id).
+
+Sesi user lain di org yang **berbeda** (kalau user itu member banyak org) **tidak ikut ter-revoke** — hanya sesi yang context org-nya org ini.
+
+**Request**: tidak ada body.
+
+**Response 200**
+```json
+{ "data": null, "message": "all sessions revoked for organization" }
+```
+Tidak error walau org tidak punya sesi aktif sama sekali (operasi idempotent).
+
+⚠️ **Ini hanya mematikan sesi yang sudah ada** (user harus login ulang). Ini **tidak** mengubah status subscription — kalau tujuannya juga supaya org tidak bisa dapat akses lagi walau login ulang (mis. klien pilot bermasalah, atau langganan diputus), pasangkan dengan `PATCH /api/admin/orgs/:org_id/subscriptions/:sub_id` (`status: "suspended"` atau `"cancelled"`) untuk tiap subscription aktif org tersebut.
+
+**Errors**: `NOT_FOUND` (404, org tidak ada).
 
 ---
 
@@ -761,8 +783,9 @@ Tidak error walau `uid` tidak punya sesi aktif sama sekali (operasi idempotent).
 | Param | Dipakai di | Tipe |
 |---|---|---|
 | `:org_id`, `:user_id`, `:sub_id`, `:uid` | path | UUID v4 string. Format salah → `400 VALIDATION_ERROR` |
-| `page`, `limit` | query (endpoint admin list) | integer > 0. Default `page=1`, `limit=20` |
+| `page`, `limit` | query (endpoint admin list) | integer > 0. Default `page=1`, `limit=20`, `limit` di-cap `100` |
 | `email` | query (`GET /api/admin/users`) | string, partial match |
+| `plan` | query (`GET /api/admin/orgs`) | string exact match, salah satu dari `trial`, `premium_monthly`, `premium_yearly`. Filter ke org dengan subscription plan tsb yang sedang aktif |
 
 ---
 
@@ -819,3 +842,58 @@ Endpoint ini ada di spesifikasi awal (`CLAUDE.md`) tapi **belum ada route/handle
 | `PATCH /api/admin/users/:uid/lock` | Lock/unlock akun user |
 
 Email verification, OAuth/SSO, MFA, payment gateway, dan webhook subscription juga belum ada (sesuai "Out of Scope for Phase 1" di `CLAUDE.md`).
+
+---
+
+## 12. Catatan Penyesuaian FE — Perubahan Enum `plan` (BREAKING CHANGE)
+
+⚠️ **Enum `plan` diganti total**, bukan ditambah. Lama: `standard | professional | enterprise | large_enterprise` (plus `trial` yang baru ditambahkan sebelumnya). Baru: **hanya 3 nilai** — `trial | premium_monthly | premium_yearly`. `premium_monthly`/`premium_yearly` adalah satu tier yang sama, bedanya cuma siklus billing (bulanan vs tahunan) — bukan tier fitur/kapasitas yang beda seperti dulu (standard/professional/enterprise punya kapasitas berjenjang).
+
+**Yang WAJIB diubah di FE:**
+1. **Dropdown/select plan** di form create/update subscription (admin panel) — ganti opsinya ke 3 nilai baru. Kalau ada label tampilan (mis. "Professional Plan"), sesuaikan jadi "Premium (Bulanan)" / "Premium (Tahunan)".
+2. **Semua hardcoded string plan lama** di kode FE (switch/if-else untuk styling badge, filter, dsb. yang cek `=== "standard"`, `"professional"`, `"enterprise"`, `"large_enterprise"`) — tidak akan pernah match lagi untuk subscription baru, harus diganti ke 3 nilai baru.
+3. **Request body** create/update subscription — kirim `plan` salah satu dari 3 nilai baru. Nilai lama sekarang ditolak server dengan `400 VALIDATION_ERROR` (pesan: `"plan must be one of: trial, premium_monthly, premium_yearly"`).
+
+**Data lama sudah di-backfill** (`db/migrations/004_backfill_premium_yearly_plan.sql`): semua subscription existing dengan `plan = "standard"/"professional"/"enterprise"/"large_enterprise"` sudah diubah jadi `"premium_yearly"`. Kalau ada environment lain (staging/production) yang belum menjalankan migration ini, response GET di environment itu masih bisa memunculkan nilai plan lama sampai migration-nya dijalankan di sana juga — cukup jalankan file migration yang sama.
+
+**Default `user_limit` per plan** (kalau admin tidak isi manual saat create): `trial` → 5, `premium_monthly`/`premium_yearly` → unlimited (`null`). Untuk kontrak dengan kuota seat tertentu (billing per-employee — lihat pembahasan sebelumnya), **isi `user_limit` eksplisit saat create**, jangan andalkan default.
+
+---
+
+## 13. Catatan Penyesuaian FE — Trial/Pilot Organisasi
+
+Fitur trial **bukan** field baru di org/user — trial itu subscription biasa dengan `plan = "trial"`. Tidak ada tabel/kolom baru, jadi tidak ada breaking change tambahan di shape response manapun (di luar perubahan enum di atas).
+
+**Membuat pilot untuk calon client:**
+```
+POST /api/admin/orgs/:org_id/subscriptions
+{ "product_id": "shifd-approval", "plan": "trial", "expires_at": "2026-07-28T00:00:00Z" }
+```
+Akses org otomatis mati sendiri ≤15 menit setelah `expires_at` lewat (access token umur 15 menit, re-issued dari DB tiap refresh) — **tidak perlu** aksi manual dari FE atau admin untuk "mematikan" trial.
+
+**Di mana FE bisa baca status trial:**
+- `GET /api/admin/orgs/:org_id` → `data.subscriptions[].plan` — cek `=== "trial"` untuk tampilkan badge, dan hitung sisa hari dari `expires_at`.
+- `GET /api/orgs/:org_id` dan `GET /api/orgs/:org_id/subscriptions` → sama, versi tenant (`active_subscriptions[].plan`).
+- `GET /api/me/orgs` → user yang login juga otomatis dapat info ini lewat `active_subscriptions[].plan`, tanpa endpoint terpisah.
+
+**Filter list org:** `GET /api/admin/orgs?plan=trial` untuk halaman admin yang mau nampilin "org mana saja yang lagi trial" tanpa buka detail satu-satu.
+
+**Batasan yang perlu diketahui FE:** item di `GET /api/admin/orgs` (list) **tidak membawa field `plan`** — cuma data org (id/name/slug). Jadi kalau butuh badge "Trial" langsung di tabel list (bukan cuma di halaman detail atau sebagai filter), itu belum ada shortcut-nya sekarang; opsinya (a) render badge di halaman detail org saja setelah diklik, atau (b) minta tambahkan `plan` ringkasan ke response list kalau memang dibutuhkan di tabel — belum dibangun karena belum ada kebutuhan konkret.
+
+---
+
+## 14. Catatan Penyesuaian FE — Revoke Akses Organisasi
+
+Endpoint baru: `POST /api/admin/orgs/:org_id/force-logout` — cabut semua sesi (refresh token) seluruh member org sekaligus, dalam satu klik. Sebelumnya cuma ada versi per-user (`POST /api/admin/users/:uid/force-logout`); ini versi org-nya.
+
+**Tempat yang wajar untuk tombol ini di admin panel:** halaman detail org (`GET /api/admin/orgs/:org_id`), sejenis tombol "Force Logout Organization" / "Revoke All Sessions" — bukan di halaman list org.
+
+**WAJIB pakai dialog konfirmasi di FE sebelum panggil endpoint ini.** Efeknya me-logout seluruh member org secara paksa (semua device, semua sesi) — tidak ada undo. Idealnya konfirmasi menyebutkan jumlah member yang akan ke-logout (ambil dari `member_count` di response `GET /api/admin/orgs/:org_id`), meski API sendiri tidak mengembalikan angka "berapa sesi yang direvoke" di response-nya (cuma `{ "data": null, "message": "..." }`).
+
+**Ini BUKAN tombol "Suspend Organization" / "Cancel Subscription".** Efeknya cuma logout paksa — kalau member login ulang dan subscription org masih aktif, mereka dapat akses lagi seperti biasa. Kalau maksud FE/admin adalah "hentikan akses org ini sepenuhnya" (bukan cuma logout paksa), harus **kombinasi 2 aksi**:
+1. `POST /api/admin/orgs/:org_id/force-logout` — logout paksa semua sesi yang sedang aktif sekarang
+2. `PATCH /api/admin/orgs/:org_id/subscriptions/:sub_id` dengan `status: "suspended"` (atau `"cancelled"`) untuk **setiap** subscription aktif org itu — supaya login ulang pun tidak dapat akses lagi
+
+Kalau di admin panel ada use case "offboard client" / "hentikan pilot yang bermasalah", pertimbangkan bikin **satu tombol gabungan** di FE yang trigger kedua call itu berurutan (BE tidak menyediakan endpoint gabungan — dua request terpisah dari FE), supaya admin tidak lupa langkah kedua.
+
+**Sesi user di org lain tidak ikut kena.** Kalau seorang user adalah member di org A dan org B, force-logout org A tidak me-logout sesi dia di org B — presisi per org context, bukan per user.

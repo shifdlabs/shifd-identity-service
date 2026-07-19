@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/ShifdLabs/shifd-identity-service/model"
 	"github.com/google/uuid"
@@ -42,9 +43,17 @@ func (r *OrganizationRepository) Update(ctx context.Context, org *model.Organiza
 }
 
 // ListPaginated returns a page of organizations ordered newest-first, plus
-// the total count across all pages.
-func (r *OrganizationRepository) ListPaginated(ctx context.Context, offset, limit int) ([]model.Organization, int64, error) {
+// the total count across all pages. plan, when non-empty, filters to orgs
+// that have an ACTIVE, non-expired subscription on that plan (e.g. "trial")
+// — the same "active subscription" definition used everywhere else in SIS.
+func (r *OrganizationRepository) ListPaginated(ctx context.Context, offset, limit int, plan string) ([]model.Organization, int64, error) {
 	base := r.db.WithContext(ctx).Model(&model.Organization{})
+	if plan != "" {
+		activeOnPlan := r.db.Model(&model.Subscription{}).
+			Select("org_id").
+			Where("plan = ? AND status = ? AND expires_at > ?", plan, model.SubscriptionStatusActive, time.Now().UTC())
+		base = base.Where("id IN (?)", activeOnPlan)
+	}
 
 	var total int64
 	if err := base.Session(&gorm.Session{}).Count(&total).Error; err != nil {

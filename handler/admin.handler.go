@@ -58,8 +58,9 @@ type addMemberAdminRequest struct {
 // ListOrgs handles GET /api/admin/orgs.
 func (h *AdminHandler) ListOrgs(c *gin.Context) {
 	page, limit := queryPagination(c, defaultPageLimit)
+	plan := c.Query("plan")
 
-	orgs, total, err := h.adminService.ListOrgs(c.Request.Context(), page, limit)
+	orgs, total, err := h.adminService.ListOrgs(c.Request.Context(), page, limit, plan)
 	if err != nil {
 		log.Printf("handler: admin list orgs error: %v", err)
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
@@ -267,4 +268,26 @@ func (h *AdminHandler) ForceLogout(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": nil, "message": "all sessions revoked"})
+}
+
+// ForceLogoutOrg handles POST /api/admin/orgs/:org_id/force-logout.
+func (h *AdminHandler) ForceLogoutOrg(c *gin.Context) {
+	orgID, ok := pathUUID(c, "org_id")
+	if !ok {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid org_id")
+		return
+	}
+
+	if err := h.adminService.ForceLogoutOrg(c.Request.Context(), orgID); err != nil {
+		switch {
+		case errors.Is(err, service.ErrOrgNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "Organization not found")
+		default:
+			log.Printf("handler: admin force logout org error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": nil, "message": "all sessions revoked for organization"})
 }
