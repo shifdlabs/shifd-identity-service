@@ -20,6 +20,10 @@ type Config struct {
 	AppEnv     string
 	AppPort    string
 	AppBaseURL string
+	// ActivationBaseURL is the frontend origin the platform-admin activation
+	// link points at (where the client lands to set their password). Optional;
+	// defaults to defaultActivationBaseURL when unset.
+	ActivationBaseURL string
 
 	// Database
 	DBHost     string
@@ -63,6 +67,10 @@ type Config struct {
 // FAILED_LOGIN_WINDOW_MINUTES is not set.
 const defaultFailedLoginWindowMinutes = 15
 
+// defaultActivationBaseURL is the approval-frontend origin used to build the
+// activation link when ACTIVATION_BASE_URL is not set (local dev default).
+const defaultActivationBaseURL = "http://localhost:5174"
+
 // requiredEnvVars are the variables documented in CLAUDE.md's
 // "Environment Variables" section. The app refuses to start without them.
 var requiredEnvVars = []string{
@@ -88,9 +96,10 @@ func Load() *Config {
 	}
 
 	return &Config{
-		AppEnv:     os.Getenv("APP_ENV"),
-		AppPort:    os.Getenv("APP_PORT"),
-		AppBaseURL: os.Getenv("APP_BASE_URL"),
+		AppEnv:            os.Getenv("APP_ENV"),
+		AppPort:           os.Getenv("APP_PORT"),
+		AppBaseURL:        os.Getenv("APP_BASE_URL"),
+		ActivationBaseURL: getenvWithDefault("ACTIVATION_BASE_URL", defaultActivationBaseURL),
 
 		DBHost:     os.Getenv("DB_HOST"),
 		DBPort:     os.Getenv("DB_PORT"),
@@ -165,6 +174,14 @@ func mustParseDuration(key string) time.Duration {
 		panic(fmt.Sprintf("config: environment variable %s must be a valid duration: %v", key, err))
 	}
 	return value
+}
+
+// getenvWithDefault returns the trimmed env var value, or fallback when unset/blank.
+func getenvWithDefault(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func splitAndTrim(raw string) []string {

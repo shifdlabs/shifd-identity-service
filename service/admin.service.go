@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/ShifdLabs/shifd-identity-service/config"
 	"github.com/ShifdLabs/shifd-identity-service/model"
 	"github.com/ShifdLabs/shifd-identity-service/repository"
 	"github.com/google/uuid"
@@ -13,6 +15,11 @@ import (
 )
 
 const defaultPageLimit = 20
+
+// activationTokenTTL is how long a platform-admin-issued activation link stays
+// valid. Longer than the 1h self-service password reset (passwordResetTokenTTL)
+// because these links are handed over out-of-band during client onboarding.
+const activationTokenTTL = 72 * time.Hour
 
 // AdminOrgDetail is returned by AdminService.GetOrgDetail: the org plus every
 // member and subscription regardless of status — platform admins see
@@ -35,6 +42,7 @@ type AdminService struct {
 	refreshTokenRepo *repository.RefreshTokenRepository
 	subscriptionSvc  *SubscriptionService
 	orgService       *OrgService
+	cfg              *config.Config
 }
 
 func NewAdminService(
@@ -44,6 +52,7 @@ func NewAdminService(
 	refreshTokenRepo *repository.RefreshTokenRepository,
 	subscriptionSvc *SubscriptionService,
 	orgService *OrgService,
+	cfg *config.Config,
 ) *AdminService {
 	return &AdminService{
 		orgRepo:          orgRepo,
@@ -52,7 +61,56 @@ func NewAdminService(
 		refreshTokenRepo: refreshTokenRepo,
 		subscriptionSvc:  subscriptionSvc,
 		orgService:       orgService,
+		cfg:              cfg,
 	}
+}
+
+// ActivationLinkResult is returned by CreateActivationLink: a ready-to-hand-over
+// link that lets an existing user set their own password, plus its expiry.
+type ActivationLinkResult struct {
+	ActivationLink string
+	ExpiresAt      time.Time
+	UserID         uuid.UUID
+	Email          string
+}
+
+// CreateActivationLink issues a password-set ("activation") link for an
+// EXISTING user identified by email, reusing the password-reset token
+// machinery (so the link is consumed by the same POST /api/auth/reset-password
+// endpoint and the same set-password page). It does NOT create users: an
+// unknown email returns ErrUserNotFound. Intended for platform-admin client
+// onboarding — the caller hands the returned link to the client's admin.
+func (s *AdminService) CreateActivationLink(ctx context.Context, email string) (*ActivationLinkResult, error) {
+	user, err := s.userRepo.FindByEmail(ctx, normalizeEmail(email))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("admin: failed to look up user: %w", err)
+	}
+
+	rawToken, err := generateSecureToken(passwordResetTokenBytes)
+	if err != nil {
+		return nil, fmt.Errorf("admin: failed to generate activation token: %w", err)
+	}
+
+	expiresAt := time.Now().UTC().Add(activationTokenTTL)
+	token := &model.PasswordResetToken{
+		UserID:    user.ID,
+		TokenHash: hashToken(rawToken),
+		ExpiresAt: expiresAt,
+	}
+	if err := s.userRepo.CreatePasswordResetToken(ctx, token); err != nil {
+		return nil, fmt.Errorf("admin: failed to store activation token: %w", err)
+	}
+
+	link := fmt.Sprintf("%s/activate?token=%s", strings.TrimRight(s.cfg.ActivationBaseURL, "/"), rawToken)
+	return &ActivationLinkResult{
+		ActivationLink: link,
+		ExpiresAt:      expiresAt,
+		UserID:         user.ID,
+		Email:          user.Email,
+	}, nil
 }
 
 // ListOrgs returns a page of organizations ordered newest-first. plan, when

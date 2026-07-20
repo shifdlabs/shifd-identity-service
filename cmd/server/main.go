@@ -75,6 +75,7 @@ func main() {
 		refreshTokenRepo,
 		subscriptionService,
 		orgService,
+		cfg,
 	)
 	userService := service.NewUserService(
 		userRepo,

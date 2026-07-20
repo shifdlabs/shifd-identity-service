@@ -126,6 +126,7 @@ func New(
 			admin.POST("/orgs/:org_id/force-logout", adminHandler.ForceLogoutOrg)
 			admin.GET("/users", adminHandler.ListUsers)
 			admin.POST("/users/:uid/force-logout", adminHandler.ForceLogout)
+			admin.POST("/activation-link", adminHandler.CreateActivationLink)
 		}
 	}
 

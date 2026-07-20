@@ -51,6 +51,10 @@ type addMemberAdminRequest struct {
 	Role  string `json:"role" binding:"required"`
 }
 
+type createActivationLinkRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -168,6 +172,39 @@ func (h *AdminHandler) AddMember(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"data": toMembershipResponse(membership), "message": "success"})
+}
+
+// CreateActivationLink handles POST /api/admin/activation-link. It generates a
+// hand-over link that lets an existing user set their own password. Returns 404
+// when no user has that email (this endpoint never creates users).
+func (h *AdminHandler) CreateActivationLink(c *gin.Context) {
+	var req createActivationLinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid request body")
+		return
+	}
+
+	result, err := h.adminService.CreateActivationLink(c.Request.Context(), req.Email)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrUserNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "No user found with that email")
+		default:
+			log.Printf("handler: admin create activation link error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"data": gin.H{
+			"activation_link": result.ActivationLink,
+			"expires_at":      result.ExpiresAt,
+			"user_id":         result.UserID,
+			"email":           result.Email,
+		},
+		"message": "success",
+	})
 }
 
 // CreateSubscription handles POST /api/admin/orgs/:org_id/subscriptions.
