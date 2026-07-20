@@ -104,7 +104,7 @@ func (s *AdminService) CreateActivationLink(ctx context.Context, email string) (
 		return nil, fmt.Errorf("admin: failed to store activation token: %w", err)
 	}
 
-	link := fmt.Sprintf("%s/activate?token=%s", strings.TrimRight(s.cfg.ActivationBaseURL, "/"), rawToken)
+	link := fmt.Sprintf("%s/activate?token=%s", strings.TrimRight(s.cfg.FrontendBaseURL, "/"), rawToken)
 	return &ActivationLinkResult{
 		ActivationLink: link,
 		ExpiresAt:      expiresAt,

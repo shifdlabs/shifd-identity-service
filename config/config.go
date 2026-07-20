@@ -20,10 +20,11 @@ type Config struct {
 	AppEnv     string
 	AppPort    string
 	AppBaseURL string
-	// ActivationBaseURL is the frontend origin the platform-admin activation
-	// link points at (where the client lands to set their password). Optional;
-	// defaults to defaultActivationBaseURL when unset.
-	ActivationBaseURL string
+	// FrontendBaseURL is the approval-frontend origin used to build links the
+	// user opens in a browser: the platform-admin activation link (/activate)
+	// and the password-recovery email link (/reset-password). Optional; defaults
+	// to defaultFrontendBaseURL when unset.
+	FrontendBaseURL string
 
 	// Database
 	DBHost     string
@@ -67,9 +68,10 @@ type Config struct {
 // FAILED_LOGIN_WINDOW_MINUTES is not set.
 const defaultFailedLoginWindowMinutes = 15
 
-// defaultActivationBaseURL is the approval-frontend origin used to build the
-// activation link when ACTIVATION_BASE_URL is not set (local dev default).
-const defaultActivationBaseURL = "http://localhost:5174"
+// defaultFrontendBaseURL is the approval-frontend origin used to build the
+// activation and password-recovery links when FRONTEND_BASE_URL is not set
+// (local dev default).
+const defaultFrontendBaseURL = "http://localhost:5174"
 
 // requiredEnvVars are the variables documented in CLAUDE.md's
 // "Environment Variables" section. The app refuses to start without them.
@@ -96,10 +98,10 @@ func Load() *Config {
 	}
 
 	return &Config{
-		AppEnv:            os.Getenv("APP_ENV"),
-		AppPort:           os.Getenv("APP_PORT"),
-		AppBaseURL:        os.Getenv("APP_BASE_URL"),
-		ActivationBaseURL: getenvWithDefault("ACTIVATION_BASE_URL", defaultActivationBaseURL),
+		AppEnv:          os.Getenv("APP_ENV"),
+		AppPort:         os.Getenv("APP_PORT"),
+		AppBaseURL:      os.Getenv("APP_BASE_URL"),
+		FrontendBaseURL: getenvWithDefault("FRONTEND_BASE_URL", defaultFrontendBaseURL),
 
 		DBHost:     os.Getenv("DB_HOST"),
 		DBPort:     os.Getenv("DB_PORT"),
