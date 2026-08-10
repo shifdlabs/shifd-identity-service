@@ -1,0 +1,47 @@
+name: Deploy SIS to EC2
+run-name: Deploy branch '${{ inputs.branch }}' to production 🚀
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch yang mau di-naikkan ke production'
+        required: true
+        default: main
+
+# Token hanya perlu baca repo; cegah penyalahgunaan GITHUB_TOKEN jika ada step yang terkompromi
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH (git pull + build + restart)
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/shifd/shifd-identity-service
+
+            echo "=== Sync ke branch ${{ inputs.branch }} ==="
+            git fetch origin
+            git checkout ${{ inputs.branch }} 2>/dev/null || git checkout -b ${{ inputs.branch }} origin/${{ inputs.branch }}
+            git reset --hard origin/${{ inputs.branch }}
+
+            echo "=== Build binary ==="
+            /usr/local/go/bin/go build -o sis-server cmd/server/main.go
+
+            echo "=== Restart service ==="
+            sudo systemctl restart sis.service
+            sleep 2
+            sudo systemctl is-active sis.service
+
+            echo "=== Health check ==="
+            curl -sf http://localhost:8080/health
+
+            echo "=== DEPLOY SELESAI ==="
