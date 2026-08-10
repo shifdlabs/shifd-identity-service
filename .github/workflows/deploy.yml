@@ -1,13 +1,10 @@
 name: Deploy SIS to EC2
-run-name: Deploy branch '${{ inputs.branch }}' to production 🚀
+run-name: Deploy branch '${{ github.ref_name }}' to production 🚀
 
+# Branch yang di-deploy ditentukan dari dropdown "Use workflow from" bawaan
+# GitHub pas klik "Run workflow" — bukan input manual.
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch yang mau di-naikkan ke production'
-        required: true
-        default: main
 
 # Token hanya perlu baca repo; cegah penyalahgunaan GITHUB_TOKEN jika ada step yang terkompromi
 permissions:
@@ -28,10 +25,10 @@ jobs:
             set -e
             cd ~/shifd/shifd-identity-service
 
-            echo "=== Sync ke branch ${{ inputs.branch }} ==="
+            echo "=== Sync ke branch ${{ github.ref_name }} ==="
             git fetch origin
-            git checkout ${{ inputs.branch }} 2>/dev/null || git checkout -b ${{ inputs.branch }} origin/${{ inputs.branch }}
-            git reset --hard origin/${{ inputs.branch }}
+            git checkout ${{ github.ref_name }} 2>/dev/null || git checkout -b ${{ github.ref_name }} origin/${{ github.ref_name }}
+            git reset --hard origin/${{ github.ref_name }}
 
             echo "=== Build binary ==="
             /usr/local/go/bin/go build -o sis-server cmd/server/main.go
