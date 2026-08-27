@@ -86,6 +86,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": toUserResponse(user), "message": "success"})
 }
 
+// maxDeviceInfoLen matches refresh_tokens.device_info VARCHAR(500).
+const maxDeviceInfoLen = 500
+
 // Login handles POST /api/auth/login.
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req loginRequest
@@ -104,7 +107,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		orgID = &parsed
 	}
 
-	result, err := h.authService.Login(c.Request.Context(), req.Email, req.Password, orgID, req.DeviceInfo, c.ClientIP())
+	// No client sends device_info in the body, which left every refresh_tokens
+	// row's device column empty and the admin activity feed blind about where a
+	// login came from. Fall back to the User-Agent, truncated to the column width.
+	deviceInfo := req.DeviceInfo
+	if deviceInfo == "" {
+		deviceInfo = c.Request.UserAgent()
+	}
+	if len(deviceInfo) > maxDeviceInfoLen {
+		deviceInfo = deviceInfo[:maxDeviceInfoLen]
+	}
+
+	result, err := h.authService.Login(c.Request.Context(), req.Email, req.Password, orgID, deviceInfo, c.ClientIP())
 	if err != nil {
 		var lockedErr *service.AccountLockedError
 		switch {

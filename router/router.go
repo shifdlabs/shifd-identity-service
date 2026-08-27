@@ -125,8 +125,10 @@ func New(
 			admin.PATCH("/orgs/:org_id/subscriptions/:sub_id", adminHandler.UpdateSubscription)
 			admin.POST("/orgs/:org_id/force-logout", adminHandler.ForceLogoutOrg)
 			admin.GET("/users", adminHandler.ListUsers)
+			admin.GET("/users/:uid", adminHandler.GetUser)
 			admin.POST("/users/:uid/force-logout", adminHandler.ForceLogout)
 			admin.POST("/activation-link", adminHandler.CreateActivationLink)
+			admin.GET("/activity", adminHandler.ListActivity)
 		}
 	}
 

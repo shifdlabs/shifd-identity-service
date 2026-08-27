@@ -7,6 +7,7 @@ import (
 
 	"github.com/ShifdLabs/shifd-identity-service/middleware"
 	"github.com/ShifdLabs/shifd-identity-service/model"
+	"github.com/ShifdLabs/shifd-identity-service/repository"
 	"github.com/ShifdLabs/shifd-identity-service/service"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -131,6 +132,27 @@ func toOrganizationsResponse(orgs []model.Organization) []gin.H {
 	return result
 }
 
+// toAdminOrgsResponse maps the admin org list rows: the standard org shape plus
+// the subscription that decides the row's status badge and expiry countdown.
+func toAdminOrgsResponse(orgs []service.AdminOrg) []gin.H {
+	result := make([]gin.H, 0, len(orgs))
+	for _, row := range orgs {
+		org := toOrganizationResponse(&row.Org)
+		org["subscription"] = nil
+		if sub := row.Subscription; sub != nil {
+			org["subscription"] = gin.H{
+				"product_id": sub.ProductID,
+				"plan":       sub.Plan,
+				"status":     sub.Status,
+				"expires_at": sub.ExpiresAt,
+				"user_limit": sub.UserLimit,
+			}
+		}
+		result = append(result, org)
+	}
+	return result
+}
+
 func toOrgDetailResponse(detail *service.OrgDetail) gin.H {
 	if detail == nil {
 		return nil
@@ -205,10 +227,51 @@ func toOrgMembersResponse(members []service.OrgMember) []gin.H {
 	return result
 }
 
-func toUsersResponse(users []model.User) []gin.H {
+// toAdminUserResponse maps a user for the admin API: the standard user shape
+// plus the session summary (spot dormant / signed-in users) and the lock state.
+// is_locked is the EFFECTIVE lock — an elapsed lock reports false, because the
+// user can already log in again; lock_expires_at says when it lifts.
+func toAdminUserResponse(row service.AdminUser) gin.H {
+	user := toUserResponse(&row.User)
+	user["last_login_at"] = row.LastLoginAt
+	user["active_sessions"] = row.ActiveSessions
+	user["is_locked"] = row.LockedUntil != nil
+	user["lock_expires_at"] = row.LockedUntil
+	return user
+}
+
+func toAdminUsersResponse(users []service.AdminUser) []gin.H {
 	result := make([]gin.H, 0, len(users))
-	for _, u := range users {
-		result = append(result, toUserResponse(&u))
+	for _, row := range users {
+		result = append(result, toAdminUserResponse(row))
+	}
+	return result
+}
+
+func toAdminUserDetailResponse(detail *service.AdminUserDetail) gin.H {
+	if detail == nil {
+		return nil
+	}
+	return gin.H{
+		"user": toAdminUserResponse(detail.AdminUser),
+		"orgs": toUserOrgsResponse(detail.Orgs),
+	}
+}
+
+func toLoginEventsResponse(events []repository.LoginEvent) []gin.H {
+	result := make([]gin.H, 0, len(events))
+	for _, e := range events {
+		result = append(result, gin.H{
+			"type":        e.Type,
+			"at":          e.At,
+			"user_id":     e.UserID,
+			"email":       e.Email,
+			"name":        e.Name,
+			"org_id":      e.OrgID,
+			"org_name":    e.OrgName,
+			"device_info": e.DeviceInfo,
+			"ip_address":  e.IPAddress,
+		})
 	}
 	return result
 }

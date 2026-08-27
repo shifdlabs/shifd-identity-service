@@ -42,6 +42,7 @@ type AdminService struct {
 	refreshTokenRepo *repository.RefreshTokenRepository
 	subscriptionSvc  *SubscriptionService
 	orgService       *OrgService
+	userService      *UserService
 	cfg              *config.Config
 }
 
@@ -52,6 +53,7 @@ func NewAdminService(
 	refreshTokenRepo *repository.RefreshTokenRepository,
 	subscriptionSvc *SubscriptionService,
 	orgService *OrgService,
+	userService *UserService,
 	cfg *config.Config,
 ) *AdminService {
 	return &AdminService{
@@ -61,6 +63,7 @@ func NewAdminService(
 		refreshTokenRepo: refreshTokenRepo,
 		subscriptionSvc:  subscriptionSvc,
 		orgService:       orgService,
+		userService:      userService,
 		cfg:              cfg,
 	}
 }
@@ -113,17 +116,44 @@ func (s *AdminService) CreateActivationLink(ctx context.Context, email string) (
 	}, nil
 }
 
+// AdminOrg is an org list row plus the subscription that decides its standing,
+// so the list can show plan/status/expiry without a detail fetch per row.
+// Subscription is nil for an org that has never had one.
+type AdminOrg struct {
+	Org          model.Organization
+	Subscription *repository.OrgSubscription
+}
+
 // ListOrgs returns a page of organizations ordered newest-first. plan, when
 // non-empty (e.g. "trial"), filters to orgs with an active subscription on
 // that plan — an unrecognized plan value simply yields zero results rather
 // than an error, same as the email search filter on ListUsers.
-func (s *AdminService) ListOrgs(ctx context.Context, page, limit int, plan string) ([]model.Organization, int64, error) {
+func (s *AdminService) ListOrgs(ctx context.Context, page, limit int, plan string) ([]AdminOrg, int64, error) {
 	offset, limit := normalizePagination(page, limit)
 	orgs, total, err := s.orgRepo.ListPaginated(ctx, offset, limit, plan)
 	if err != nil {
 		return nil, 0, fmt.Errorf("admin: failed to list organizations: %w", err)
 	}
-	return orgs, total, nil
+
+	ids := make([]uuid.UUID, 0, len(orgs))
+	for _, org := range orgs {
+		ids = append(ids, org.ID)
+	}
+	subs, err := s.orgRepo.SubscriptionSummaryByOrgIDs(ctx, ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("admin: failed to load subscription summary: %w", err)
+	}
+
+	rows := make([]AdminOrg, 0, len(orgs))
+	for _, org := range orgs {
+		row := AdminOrg{Org: org}
+		if sub, ok := subs[org.ID]; ok {
+			found := sub
+			row.Subscription = &found
+		}
+		rows = append(rows, row)
+	}
+	return rows, total, nil
 }
 
 // CreateOrgForOwner creates an organization with ownerEmail (an existing
@@ -229,15 +259,127 @@ func (s *AdminService) GetOrgDetail(ctx context.Context, orgID uuid.UUID) (*Admi
 	return &AdminOrgDetail{Org: org, Members: members, Subscriptions: subs}, nil
 }
 
+// AdminUser is a user list row plus the login summary derived from that user's
+// refresh tokens. LastLoginAt is nil for a user who has never logged in.
+type AdminUser struct {
+	User           model.User
+	LastLoginAt    *time.Time
+	ActiveSessions int
+	// Non-nil only while a lock is actually in force — see lockedUntil.
+	LockedUntil *time.Time
+}
+
+// AdminUserDetail is one user with everything the admin panel shows about them.
+type AdminUserDetail struct {
+	AdminUser
+	Orgs []UserOrg
+}
+
+// lockedUntil reports when a locked account unlocks itself, or nil when the
+// account is not locked *right now*. SIS locks an account after too many failed
+// logins (AuthService.handleFailedLogin) but the lock elapses on its own after
+// ACCOUNT_LOCK_DURATION_MINUTES, and the next correct login clears the flag —
+// so a stale is_locked=true row must not be reported as locked, or the panel
+// would show a wall the user can already walk through.
+func (s *AdminService) lockedUntil(user *model.User) *time.Time {
+	if !user.IsLocked || user.LockTimestamp == nil {
+		return nil
+	}
+	until := user.LockTimestamp.Add(time.Duration(s.cfg.AccountLockDurationMinutes) * time.Minute)
+	if !time.Now().UTC().Before(until) {
+		return nil
+	}
+	return &until
+}
+
 // ListUsers returns a page of users ordered newest-first, optionally filtered
-// by a case-insensitive partial match on email.
-func (s *AdminService) ListUsers(ctx context.Context, page, limit int, emailSearch string) ([]model.User, int64, error) {
+// by a case-insensitive partial match on email. Each row carries the user's
+// last login and live session count, fetched in one extra grouped query for
+// the whole page rather than one per user.
+func (s *AdminService) ListUsers(ctx context.Context, page, limit int, emailSearch string) ([]AdminUser, int64, error) {
 	offset, limit := normalizePagination(page, limit)
 	users, total, err := s.userRepo.ListPaginated(ctx, offset, limit, emailSearch)
 	if err != nil {
 		return nil, 0, fmt.Errorf("admin: failed to list users: %w", err)
 	}
-	return users, total, nil
+
+	ids := make([]uuid.UUID, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	stats, err := s.refreshTokenRepo.StatsByUserIDs(ctx, ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("admin: failed to load session stats: %w", err)
+	}
+
+	rows := make([]AdminUser, 0, len(users))
+	for _, u := range users {
+		row := AdminUser{User: u, LockedUntil: s.lockedUntil(&u)}
+		if stat, ok := stats[u.ID]; ok {
+			lastLogin := stat.LastLoginAt
+			row.LastLoginAt = &lastLogin
+			row.ActiveSessions = stat.ActiveSessions
+		}
+		rows = append(rows, row)
+	}
+	return rows, total, nil
+}
+
+// normalizeEventType keeps only the two event types the feed knows about;
+// anything else becomes "" (no filter) so a stale or hand-typed ?type= shows
+// everything instead of erroring or silently returning an empty page.
+func normalizeEventType(eventType string) string {
+	if eventType == repository.EventLogin || eventType == repository.EventLoginFailed {
+		return eventType
+	}
+	return ""
+}
+
+// ListLoginEvents returns a page of the platform-wide login feed (successful
+// logins and failed attempts, newest first). eventType narrows to one kind;
+// anything other than the two known types is ignored rather than rejected, so
+// a stale client filter degrades to "show everything" instead of erroring.
+func (s *AdminService) ListLoginEvents(ctx context.Context, page, limit int, emailSearch, eventType string) ([]repository.LoginEvent, int64, error) {
+	offset, limit := normalizePagination(page, limit)
+	events, total, err := s.refreshTokenRepo.ListLoginEvents(ctx, offset, limit, emailSearch, normalizeEventType(eventType))
+	if err != nil {
+		return nil, 0, fmt.Errorf("admin: failed to list login events: %w", err)
+	}
+	return events, total, nil
+}
+
+// GetUserDetail returns one user with their session summary, lock state and
+// org memberships — everything the panel's user page shows, in one call, so it
+// no longer has to carry a user object through router state from the list.
+func (s *AdminService) GetUserDetail(ctx context.Context, userID uuid.UUID) (*AdminUserDetail, error) {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("admin: failed to look up user: %w", err)
+	}
+
+	stats, err := s.refreshTokenRepo.StatsByUserIDs(ctx, []uuid.UUID{user.ID})
+	if err != nil {
+		return nil, fmt.Errorf("admin: failed to load session stats: %w", err)
+	}
+
+	orgs, err := s.userService.ListUserOrgs(ctx, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("admin: failed to list user orgs: %w", err)
+	}
+
+	detail := &AdminUserDetail{
+		AdminUser: AdminUser{User: *user, LockedUntil: s.lockedUntil(user)},
+		Orgs:      orgs,
+	}
+	if stat, ok := stats[user.ID]; ok {
+		lastLogin := stat.LastLoginAt
+		detail.LastLoginAt = &lastLogin
+		detail.ActiveSessions = stat.ActiveSessions
+	}
+	return detail, nil
 }
 
 // ForceLogout revokes every refresh token for userID, ending all of that
