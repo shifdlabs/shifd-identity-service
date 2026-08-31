@@ -570,7 +570,14 @@ Query params: `page` (default `1`), `limit` (default `20`, di-cap maksimal `100`
         "name": "PT Contoh Sejahtera",
         "slug": "contoh-sejahtera",
         "created_at": "2026-06-23T10:05:00Z",
-        "updated_at": "2026-06-23T10:05:00Z"
+        "updated_at": "2026-06-23T10:05:00Z",
+        "subscription": {
+          "product_id": "shifd-approval",
+          "plan": "trial",
+          "status": "active",
+          "expires_at": "2026-09-10T17:00:00Z",
+          "user_limit": 5
+        }
       }
     ],
     "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
@@ -578,7 +585,9 @@ Query params: `page` (default `1`), `limit` (default `20`, di-cap maksimal `100`
   "message": "success"
 }
 ```
-Diurutkan terbaru dulu (`created_at DESC`). **Catatan:** item di sini **tidak** membawa field `plan`/`expires_at` — itu ada di level subscription, bukan org. Untuk tahu plan & sisa waktu trial per org, buka `GET /api/admin/orgs/:org_id` (lihat catatan FE di bawah).
+Diurutkan terbaru dulu (`created_at DESC`).
+
+**`subscription` (sejak Agustus 2026)** — satu subscription yang menentukan status org: yang **aktif dan paling cepat habis**, atau kalau tidak ada yang aktif, yang paling akhir berakhir (apa pun statusnya). `null` untuk org yang belum pernah punya subscription. Satu org hari ini hanya punya satu produk (`shifd-approval`), jadi praktisnya ini "subscription org tersebut". Dengan ini badge status + hitung mundur expiry bisa dirender langsung di tabel list tanpa `GET /api/admin/orgs/:org_id` per baris.
 
 ---
 
@@ -753,7 +762,9 @@ Query params: `page` (default `1`), `limit` (default `20`), `email` (opsional, p
         "is_platform_admin": false,
         "email_verified_at": null,
         "created_at": "2026-06-23T10:00:00Z",
-        "updated_at": "2026-06-23T10:00:00Z"
+        "updated_at": "2026-06-23T10:00:00Z",
+        "last_login_at": "2026-08-27T13:11:09.663807Z",
+        "active_sessions": 2
       }
     ],
     "pagination": { "page": 1, "limit": 20, "total": 1, "total_pages": 1 }
@@ -762,6 +773,91 @@ Query params: `page` (default `1`), `limit` (default `20`), `email` (opsional, p
 }
 ```
 Contoh cari: `GET /api/admin/users?email=budi&page=1&limit=10`
+
+`is_locked` = akun sedang terkunci **saat ini** karena login gagal berulang; `lock_expires_at` = kapan kuncinya lepas sendiri. Kunci ini kedaluwarsa otomatis setelah `ACCOUNT_LOCK_DURATION_MINUTES` dan flag-nya dibersihkan saat login benar berikutnya, jadi baris yang masih punya `is_locked=true` di DB tapi window-nya sudah lewat dilaporkan sebagai **tidak** terkunci — supaya panel tidak menampilkan tembok yang sebenarnya sudah bisa dilewati user.
+
+`last_login_at` = waktu login terakhir (`null` kalau user belum pernah login sama sekali). `active_sessions` = jumlah sesi yang masih hidup (refresh token belum dicabut & belum expired) — `0` artinya user sedang tidak login di mana pun. Keduanya diturunkan dari tabel `refresh_tokens`, bukan kolom di tabel `users`.
+
+---
+
+### `GET /api/admin/activity`
+Feed login se-platform, terbaru dulu: login sukses (1 baris `refresh_tokens` per login) digabung dengan percobaan login gagal (`failed_login_attempts`).
+
+Query params: `page` (default `1`), `limit` (default `20`, cap `100`), `email` (opsional, partial match case-insensitive), `type` (opsional: `login` | `login_failed`; nilai lain diabaikan = tampil semua).
+
+**Response 200**
+```json
+{
+  "data": {
+    "items": [
+      {
+        "type": "login",
+        "at": "2026-08-27T13:11:09.663807Z",
+        "user_id": "630e19ab-9027-4fd7-8a92-83f6aa788edb",
+        "email": "budi@contoh.com",
+        "name": "Budi Santoso",
+        "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
+        "org_name": "PT Demo Company",
+        "device_info": "Mozilla/5.0 ...",
+        "ip_address": null
+      },
+      {
+        "type": "login_failed",
+        "at": "2026-08-27T12:59:01.100000Z",
+        "user_id": null,
+        "email": "salah@contoh.com",
+        "name": "",
+        "org_id": null,
+        "org_name": null,
+        "device_info": null,
+        "ip_address": "103.12.4.9"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 2, "total_pages": 1 }
+  },
+  "message": "success"
+}
+```
+
+Catatan:
+- `device_info` hanya terisi di event `login`, `ip_address` hanya di `login_failed` — memang itu saja yang masing-masing direkam. Sejak Agustus 2026 `device_info` otomatis diisi dari header `User-Agent` kalau body login tidak mengirim `device_info`; row lama tetap kosong.
+- `user_id`/`name` bisa `null`/`""` di `login_failed` kalau email-nya tidak cocok dengan akun mana pun.
+- `org_id`/`org_name` = org context sesi tersebut saat login, bukan seluruh org milik user.
+- Feed ini **bukan** audit log aplikasi. Aktivitas di dalam produk (mis. approval) tidak ada di sini — SIS hanya tahu peristiwa autentikasi.
+
+---
+
+### `GET /api/admin/users/:uid`
+Detail 1 user: profil + ringkasan sesi + status kunci + semua org yang dia ikuti (status membership apa pun). Endpoint ini yang dipakai halaman user detail admin panel — sebelumnya FE terpaksa mengoper objek user lewat router state dari halaman list, sehingga hard refresh / deep link cuma dapat tampilan terbatas.
+
+**Response 200**
+```json
+{
+  "data": {
+    "user": {
+      "id": "630e19ab-9027-4fd7-8a92-83f6aa788edb",
+      "email": "budi@contoh.com",
+      "name": "Budi Santoso",
+      "is_platform_admin": false,
+      "created_at": "2026-06-23T10:00:00Z",
+      "last_login_at": "2026-08-27T13:11:09.663807Z",
+      "active_sessions": 2,
+      "is_locked": false,
+      "lock_expires_at": null
+    },
+    "orgs": [
+      {
+        "org": { "id": "19bd5ea0-...", "name": "PT Contoh Sejahtera", "slug": "contoh-sejahtera" },
+        "role": "owner",
+        "membership_status": "active",
+        "active_subscriptions": [ { "product_id": "shifd-approval", "plan": "trial", "status": "active" } ]
+      }
+    ]
+  },
+  "message": "success"
+}
+```
+`uid` bukan UUID → `400 VALIDATION_ERROR`. User tidak ada → `404 NOT_FOUND`. Org yang sudah soft-deleted tidak ikut muncul di `orgs`.
 
 ---
 
@@ -784,7 +880,8 @@ Tidak error walau `uid` tidak punya sesi aktif sama sekali (operasi idempotent).
 |---|---|---|
 | `:org_id`, `:user_id`, `:sub_id`, `:uid` | path | UUID v4 string. Format salah → `400 VALIDATION_ERROR` |
 | `page`, `limit` | query (endpoint admin list) | integer > 0. Default `page=1`, `limit=20`, `limit` di-cap `100` |
-| `email` | query (`GET /api/admin/users`) | string, partial match |
+| `email` | query (`GET /api/admin/users`, `GET /api/admin/activity`) | string, partial match |
+| `type` | query (`GET /api/admin/activity`) | `login` atau `login_failed`. Nilai lain = tanpa filter |
 | `plan` | query (`GET /api/admin/orgs`) | string exact match, salah satu dari `trial`, `premium_monthly`, `premium_yearly`. Filter ke org dengan subscription plan tsb yang sedang aktif |
 
 ---
@@ -838,8 +935,7 @@ Endpoint ini ada di spesifikasi awal (`CLAUDE.md`) tapi **belum ada route/handle
 | Method & Path | Keterangan |
 |---|---|
 | `PATCH /api/orgs/:org_id` | Update nama organisasi |
-| `GET /api/admin/users/:uid` | Detail 1 user + membership orgnya |
-| `PATCH /api/admin/users/:uid/lock` | Lock/unlock akun user |
+| `PATCH /api/admin/users/:uid/lock` | Lock/unlock akun user secara manual (kunci otomatis dari login gagal tetap jalan, dan lepas sendiri) |
 
 Email verification, OAuth/SSO, MFA, payment gateway, dan webhook subscription juga belum ada (sesuai "Out of Scope for Phase 1" di `CLAUDE.md`).
 
@@ -878,7 +974,7 @@ Akses org otomatis mati sendiri ≤15 menit setelah `expires_at` lewat (access t
 
 **Filter list org:** `GET /api/admin/orgs?plan=trial` untuk halaman admin yang mau nampilin "org mana saja yang lagi trial" tanpa buka detail satu-satu.
 
-**Batasan yang perlu diketahui FE:** item di `GET /api/admin/orgs` (list) **tidak membawa field `plan`** — cuma data org (id/name/slug). Jadi kalau butuh badge "Trial" langsung di tabel list (bukan cuma di halaman detail atau sebagai filter), itu belum ada shortcut-nya sekarang; opsinya (a) render badge di halaman detail org saja setelah diklik, atau (b) minta tambahkan `plan` ringkasan ke response list kalau memang dibutuhkan di tabel — belum dibangun karena belum ada kebutuhan konkret.
+**Catatan FE:** batasan lama "item list tidak membawa `plan`" **sudah tidak berlaku** sejak Agustus 2026 — tiap item `GET /api/admin/orgs` sekarang membawa objek `subscription` (plan/status/expires_at/user_limit), jadi badge "Trial" dan hitung mundur expiry bisa dirender langsung di tabel list.
 
 ---
 

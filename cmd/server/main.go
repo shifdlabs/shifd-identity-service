@@ -68,6 +68,12 @@ func main() {
 		userRepo,
 		emailService,
 	)
+	userService := service.NewUserService(
+		userRepo,
+		orgMembershipRepo,
+		organizationRepo,
+		subscriptionService,
+	)
 	adminService := service.NewAdminService(
 		organizationRepo,
 		orgMembershipRepo,
@@ -75,13 +81,8 @@ func main() {
 		refreshTokenRepo,
 		subscriptionService,
 		orgService,
+		userService,
 		cfg,
-	)
-	userService := service.NewUserService(
-		userRepo,
-		orgMembershipRepo,
-		organizationRepo,
-		subscriptionService,
 	)
 
 	// Handlers

@@ -47,11 +47,12 @@ func (r *OrganizationRepository) Update(ctx context.Context, org *model.Organiza
 // that have an ACTIVE, non-expired subscription on that plan (e.g. "trial")
 // — the same "active subscription" definition used everywhere else in SIS.
 func (r *OrganizationRepository) ListPaginated(ctx context.Context, offset, limit int, plan string) ([]model.Organization, int64, error) {
+	now := time.Now().UTC()
 	base := r.db.WithContext(ctx).Model(&model.Organization{})
 	if plan != "" {
 		activeOnPlan := r.db.Model(&model.Subscription{}).
 			Select("org_id").
-			Where("plan = ? AND status = ? AND expires_at > ?", plan, model.SubscriptionStatusActive, time.Now().UTC())
+			Where("plan = ? AND status = ? AND expires_at > ?", plan, model.SubscriptionStatusActive, now)
 		base = base.Where("id IN (?)", activeOnPlan)
 	}
 
@@ -65,4 +66,46 @@ func (r *OrganizationRepository) ListPaginated(ctx context.Context, offset, limi
 		return nil, 0, err
 	}
 	return orgs, total, nil
+}
+
+// OrgSubscription is the one subscription that decides how an org reads in a
+// list: the active one lapsing soonest, or — when none is active — the last one
+// to end, whatever state it ended in. An org only ever has one product today
+// (shifd-approval), so in practice this is just "the org's subscription".
+type OrgSubscription struct {
+	OrgID     uuid.UUID `gorm:"column:org_id"`
+	ProductID string    `gorm:"column:product_id"`
+	Plan      string    `gorm:"column:plan"`
+	Status    string    `gorm:"column:status"`
+	ExpiresAt time.Time `gorm:"column:expires_at"`
+	UserLimit *int      `gorm:"column:user_limit"`
+}
+
+// SubscriptionSummaryByOrgIDs returns that subscription per org id, in one
+// query for the whole page. Orgs with no subscription row at all are absent
+// from the map — callers render those as "no subscription", not as expired.
+func (r *OrganizationRepository) SubscriptionSummaryByOrgIDs(ctx context.Context, orgIDs []uuid.UUID) (map[uuid.UUID]OrgSubscription, error) {
+	summary := make(map[uuid.UUID]OrgSubscription, len(orgIDs))
+	if len(orgIDs) == 0 {
+		return summary, nil
+	}
+
+	var rows []OrgSubscription
+	if err := r.db.WithContext(ctx).Raw(`
+		SELECT DISTINCT ON (org_id) org_id, product_id, plan, status, expires_at, user_limit
+		  FROM subscriptions
+		 WHERE org_id IN ?
+		 ORDER BY org_id,
+		          (status = ?) DESC,
+		          CASE WHEN status = ? THEN expires_at END ASC,
+		          expires_at DESC`,
+		orgIDs, model.SubscriptionStatusActive, model.SubscriptionStatusActive,
+	).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		summary[row.OrgID] = row
+	}
+	return summary, nil
 }

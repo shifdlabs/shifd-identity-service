@@ -76,7 +76,7 @@ func (h *AdminHandler) ListOrgs(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"data":    paginatedResponse(toOrganizationsResponse(orgs), page, limit, total),
+		"data":    paginatedResponse(toAdminOrgsResponse(orgs), page, limit, total),
 		"message": "success",
 	})
 }
@@ -294,9 +294,33 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"data":    paginatedResponse(toUsersResponse(users), page, limit, total),
+		"data":    paginatedResponse(toAdminUsersResponse(users), page, limit, total),
 		"message": "success",
 	})
+}
+
+// GetUser handles GET /api/admin/users/:uid — one user with their session
+// summary, lock state and org memberships.
+func (h *AdminHandler) GetUser(c *gin.Context) {
+	userID, ok := pathUUID(c, "uid")
+	if !ok {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid user id")
+		return
+	}
+
+	detail, err := h.adminService.GetUserDetail(c.Request.Context(), userID)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrUserNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "User not found")
+		default:
+			log.Printf("handler: admin get user error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": toAdminUserDetailResponse(detail), "message": "success"})
 }
 
 // ForceLogout handles POST /api/admin/users/:uid/force-logout.
@@ -346,6 +370,27 @@ func (h *AdminHandler) SetUserActive(c *gin.Context) {
 		message = "user activated"
 	}
 	c.JSON(http.StatusOK, gin.H{"data": nil, "message": message})
+}
+
+// ListActivity handles GET /api/admin/activity — the platform-wide login feed
+// (successful logins and failed attempts), newest first. Optional filters:
+// ?email= (partial, case-insensitive) and ?type=login|login_failed.
+func (h *AdminHandler) ListActivity(c *gin.Context) {
+	page, limit := queryPagination(c, defaultPageLimit)
+
+	events, total, err := h.adminService.ListLoginEvents(
+		c.Request.Context(), page, limit, c.Query("email"), c.Query("type"),
+	)
+	if err != nil {
+		log.Printf("handler: admin list activity error: %v", err)
+		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":    paginatedResponse(toLoginEventsResponse(events), page, limit, total),
+		"message": "success",
+	})
 }
 
 // ForceLogoutOrg handles POST /api/admin/orgs/:org_id/force-logout.
