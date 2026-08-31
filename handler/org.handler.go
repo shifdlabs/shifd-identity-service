@@ -65,6 +65,8 @@ func (h *OrgHandler) CreateOrg(c *gin.Context) {
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		case errors.Is(err, service.ErrSlugAlreadyExists):
 			respondError(c, http.StatusConflict, "SLUG_ALREADY_EXISTS", err.Error())
+		case errors.Is(err, service.ErrUserAlreadyInAnotherOrg):
+			respondError(c, http.StatusConflict, "USER_ALREADY_IN_ORG", err.Error())
 		default:
 			log.Printf("handler: create org error: %v", err)
 			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")

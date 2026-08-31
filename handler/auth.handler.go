@@ -112,6 +112,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			respondError(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid email or password")
 		case errors.As(err, &lockedErr):
 			respondError(c, http.StatusForbidden, "ACCOUNT_LOCKED", "Account is locked due to too many failed login attempts")
+		case errors.Is(err, service.ErrAccountDeactivated):
+			respondError(c, http.StatusForbidden, "ACCOUNT_DEACTIVATED", "This account has been deactivated")
 		case errors.Is(err, service.ErrForbidden):
 			respondError(c, http.StatusForbidden, "FORBIDDEN", "You do not have access to the requested organization")
 		default:
@@ -242,6 +244,7 @@ func toUserResponse(u *model.User) gin.H {
 		"name":              u.Name,
 		"phone":             u.Phone,
 		"is_platform_admin": u.IsPlatformAdmin,
+		"is_active":         u.IsActive,
 		"email_verified_at": u.EmailVerifiedAt,
 		"created_at":        u.CreatedAt,
 		"updated_at":        u.UpdatedAt,

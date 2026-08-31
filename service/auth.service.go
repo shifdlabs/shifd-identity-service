@@ -62,6 +62,9 @@ var (
 	ErrTokenExpired       = errors.New("token has expired")
 	ErrTokenInvalid       = errors.New("token is invalid")
 	ErrForbidden          = errors.New("not an active member of this organization")
+	// ErrAccountDeactivated is permanent (admin-controlled) — unlike
+	// AccountLockedError, it does not auto-expire; only an admin can undo it.
+	ErrAccountDeactivated = errors.New("account has been deactivated")
 )
 
 // AccountLockedError indicates the account is locked until LockTimestamp plus
@@ -178,6 +181,10 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 			return nil, ErrInvalidCredentials
 		}
 		return nil, fmt.Errorf("auth: failed to look up user: %w", err)
+	}
+
+	if !user.IsActive {
+		return nil, ErrAccountDeactivated
 	}
 
 	if user.IsLocked {
@@ -414,9 +421,10 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (stri
 		return "", fmt.Errorf("auth: failed to look up user: %w", err)
 	}
 
-	// Refuse to mint access tokens for a currently-locked account (defence in
-	// depth alongside revoking refresh tokens at lock time).
-	if s.isLockActive(user) {
+	// Refuse to mint access tokens for a deactivated or currently-locked
+	// account (defence in depth alongside revoking refresh tokens at
+	// deactivation/lock time).
+	if !user.IsActive || s.isLockActive(user) {
 		return "", ErrTokenInvalid
 	}
 

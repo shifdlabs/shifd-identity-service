@@ -55,6 +55,10 @@ type createActivationLinkRequest struct {
 	Email string `json:"email" binding:"required,email"`
 }
 
+type setUserActiveRequest struct {
+	IsActive *bool `json:"is_active" binding:"required"`
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -94,6 +98,8 @@ func (h *AdminHandler) CreateOrg(c *gin.Context) {
 			respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 		case errors.Is(err, service.ErrSlugAlreadyExists):
 			respondError(c, http.StatusConflict, "SLUG_ALREADY_EXISTS", err.Error())
+		case errors.Is(err, service.ErrUserAlreadyInAnotherOrg):
+			respondError(c, http.StatusConflict, "USER_ALREADY_IN_ORG", "This user is already a member of another organization")
 		default:
 			log.Printf("handler: admin create org error: %v", err)
 			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
@@ -164,6 +170,8 @@ func (h *AdminHandler) AddMember(c *gin.Context) {
 			respondError(c, http.StatusNotFound, "NOT_FOUND", "Organization not found")
 		case errors.Is(err, service.ErrAlreadyMember):
 			respondError(c, http.StatusConflict, "ALREADY_MEMBER", err.Error())
+		case errors.Is(err, service.ErrUserAlreadyInAnotherOrg):
+			respondError(c, http.StatusConflict, "USER_ALREADY_IN_ORG", err.Error())
 		default:
 			log.Printf("handler: admin add member error: %v", err)
 			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
@@ -276,8 +284,9 @@ func (h *AdminHandler) UpdateSubscription(c *gin.Context) {
 func (h *AdminHandler) ListUsers(c *gin.Context) {
 	page, limit := queryPagination(c, defaultPageLimit)
 	emailSearch := c.Query("email")
+	excludeOrgMembers := c.Query("exclude_org_members") == "true"
 
-	users, total, err := h.adminService.ListUsers(c.Request.Context(), page, limit, emailSearch)
+	users, total, err := h.adminService.ListUsers(c.Request.Context(), page, limit, emailSearch, excludeOrgMembers)
 	if err != nil {
 		log.Printf("handler: admin list users error: %v", err)
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
@@ -305,6 +314,38 @@ func (h *AdminHandler) ForceLogout(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": nil, "message": "all sessions revoked"})
+}
+
+// SetUserActive handles PATCH /api/admin/users/:uid/active.
+func (h *AdminHandler) SetUserActive(c *gin.Context) {
+	userID, ok := pathUUID(c, "uid")
+	if !ok {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid user id")
+		return
+	}
+
+	var req setUserActiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "VALIDATION_ERROR", "is_active (boolean) is required")
+		return
+	}
+
+	if err := h.adminService.SetUserActive(c.Request.Context(), userID, *req.IsActive); err != nil {
+		switch {
+		case errors.Is(err, service.ErrUserNotFound):
+			respondError(c, http.StatusNotFound, "NOT_FOUND", "User not found")
+		default:
+			log.Printf("handler: admin set user active error: %v", err)
+			respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Something went wrong")
+		}
+		return
+	}
+
+	message := "user deactivated"
+	if *req.IsActive {
+		message = "user activated"
+	}
+	c.JSON(http.StatusOK, gin.H{"data": nil, "message": message})
 }
 
 // ForceLogoutOrg handles POST /api/admin/orgs/:org_id/force-logout.

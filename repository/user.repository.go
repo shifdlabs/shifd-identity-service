@@ -45,11 +45,17 @@ func (r *UserRepository) Update(ctx context.Context, user *model.User) error {
 
 // ListPaginated returns a page of users ordered newest-first, plus the total
 // count across all pages. emailSearch, when non-empty, filters to emails
-// containing it (case-insensitive).
-func (r *UserRepository) ListPaginated(ctx context.Context, offset, limit int, emailSearch string) ([]model.User, int64, error) {
+// containing it (case-insensitive). When excludeOrgMembers is true, users who
+// already have at least one org_memberships row (any role or status) are left
+// out — used when picking a candidate owner for a brand-new organization, so
+// a user already tied to an org doesn't show up as a pickable option.
+func (r *UserRepository) ListPaginated(ctx context.Context, offset, limit int, emailSearch string, excludeOrgMembers bool) ([]model.User, int64, error) {
 	base := r.db.WithContext(ctx).Model(&model.User{})
 	if emailSearch != "" {
 		base = base.Where("email ILIKE ?", "%"+emailSearch+"%")
+	}
+	if excludeOrgMembers {
+		base = base.Where("NOT EXISTS (SELECT 1 FROM org_memberships WHERE org_memberships.user_id = users.id)")
 	}
 
 	var total int64
