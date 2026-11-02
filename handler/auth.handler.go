@@ -141,6 +141,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			"refresh_token": result.RefreshToken,
 			"user":          toUserResponse(result.User),
 			"org":           toOrgResponse(result.Org),
+			"access":        result.Access,
 		},
 		"message": "success",
 	})
@@ -154,7 +155,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
-	accessToken, err := h.authService.Refresh(c.Request.Context(), req.RefreshToken)
+	result, err := h.authService.Refresh(c.Request.Context(), req.RefreshToken)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTokenExpired):
@@ -168,7 +169,13 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"access_token": accessToken}, "message": "success"})
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"access_token": result.AccessToken,
+			"access":       result.Access,
+		},
+		"message": "success",
+	})
 }
 
 // Logout handles POST /api/auth/logout. Revoking an unknown or already-revoked

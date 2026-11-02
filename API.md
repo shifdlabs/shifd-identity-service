@@ -139,11 +139,13 @@ Rate limited.
       "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
       "role": "owner",
       "status": "active"
-    }
+    },
+    "access": ["shifd-approval"]
   },
   "message": "success"
 }
 ```
+- `access` = daftar aplikasi Shifd yang boleh dimasuki user (isinya sama dengan klaim `access` di JWT, lihat [7. JWT Access Token Claims](#7-jwt-access-token-claims)). FE tiap aplikasi cek array ini sebelum mengizinkan masuk.
 - `org` bisa `null` → artinya user belum punya/join org manapun. FE harus handle case ini (misal arahkan ke flow "buat organisasi").
 - `refresh_token` **bukan JWT** — cuma UUID v4 random string. Jangan coba decode sebagai JWT.
 - Klaim lengkap di dalam `access_token` (JWT) dijelaskan di [7. JWT Access Token Claims](#7-jwt-access-token-claims).
@@ -162,11 +164,14 @@ Rate limited.
 **Response 200**
 ```json
 {
-  "data": { "access_token": "eyJhbGciOiJSUzI1NiIs..." },
+  "data": {
+    "access_token": "eyJhbGciOiJSUzI1NiIs...",
+    "access": ["shifd-approval"]
+  },
   "message": "success"
 }
 ```
-Catatan: `refresh_token` **tidak ikut dikembalikan lagi** dan tidak di-rotate — token yang sama dipakai terus sampai expired/logout. Org context (`org_id`/`org_role`/`products`) di access_token baru di-derive ulang dari DB saat ini, bukan dari token lama.
+Catatan: `refresh_token` **tidak ikut dikembalikan lagi** dan tidak di-rotate — token yang sama dipakai terus sampai expired/logout. Org context (`org_id`/`org_role`/`products`) dan `access` di access_token baru di-derive ulang dari DB saat ini, bukan dari token lama.
 
 **Errors**: `VALIDATION_ERROR` (400), `TOKEN_EXPIRED` (401), `TOKEN_INVALID` (401).
 
@@ -901,10 +906,16 @@ Tidak error walau `uid` tidak punya sesi aktif sama sekali (operasi idempotent).
   "name": "Budi Santoso",
   "org_id": "19bd5ea0-8da5-4db4-b7e4-6575e8579ab2",
   "org_role": "owner",
-  "products": ["shifd-approval"]
+  "products": ["shifd-approval"],
+  "access": ["shifd-approval", "company-profile-cms"]
 }
 ```
 - `exp - iat` = 900 detik (15 menit).
+- `access` **selalu ada** (bisa array kosong), dihitung ulang dari DB tiap login & refresh:
+  - setiap `product_id` dari subscription aktif org (sama dengan `products`, misal `"shifd-approval"`)
+  - `"company-profile-cms"` kalau `users.is_platform_admin = true` (akses CMS artikel company profile)
+
+  Akses yang dicabut mati sendiri ≤15 menit (umur access token). Klaim ini hanya dipakai aplikasi lain untuk gate masuk — endpoint `/api/admin/*` SIS tetap cek `is_platform_admin` ke DB.
 - `org_id`, `org_role`, `products` **hilang sepenuhnya dari claims** (bukan `null`) kalau user tidak punya org context aktif saat token diterbitkan.
 - `products` = daftar `product_id` dari subscription **aktif & belum expired** milik org tersebut.
 - Header JWT punya `kid: "sis-key-v1"` — cocokkan dengan `kid` di response JWKS kalau FE/service lain mau verifikasi signature sendiri (biasanya tidak perlu, itu tugas Shifd Approval).

@@ -82,6 +82,15 @@ type LoginResult struct {
 	RefreshToken string
 	User         *model.User
 	Org          *model.OrgMembership
+	// Access mirrors the token's "access" claim so the FE can gate app entry
+	// without decoding the JWT.
+	Access []string
+}
+
+// RefreshResult is returned by AuthService.Refresh on success.
+type RefreshResult struct {
+	AccessToken string
+	Access      []string
 }
 
 // AuthService implements registration, login, token refresh, logout, and
@@ -210,7 +219,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 		return nil, err
 	}
 
-	accessToken, err := s.issueAccessToken(user, membership, products, userLimit)
+	accessToken, access, err := s.issueAccessToken(user, membership, products, userLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +234,7 @@ func (s *AuthService) Login(ctx context.Context, email, password string, orgID *
 		RefreshToken: rawRefreshToken,
 		User:         user,
 		Org:          membership,
+		Access:       access,
 	}, nil
 }
 
@@ -336,9 +346,33 @@ func (s *AuthService) loadProductsAndUserLimit(ctx context.Context, orgID uuid.U
 	return products, userLimit, nil
 }
 
-func (s *AuthService) issueAccessToken(user *model.User, membership *model.OrgMembership, products []string, userLimit *int) (string, error) {
-	claims := buildClaims(user, membership, products, userLimit)
-	return jwtutil.GenerateAccessToken(s.privateKey, s.cfg.JWTKeyID, s.cfg.JWTIssuer, s.cfg.JWTAccessTokenExpiry, claims)
+// issueAccessToken signs a new access token and returns it together with the
+// access list embedded in its "access" claim.
+func (s *AuthService) issueAccessToken(user *model.User, membership *model.OrgMembership, products []string, userLimit *int) (string, []string, error) {
+	access := computeAccess(user, products)
+	claims := buildClaims(user, membership, products, userLimit, access)
+	token, err := jwtutil.GenerateAccessToken(s.privateKey, s.cfg.JWTKeyID, s.cfg.JWTIssuer, s.cfg.JWTAccessTokenExpiry, claims)
+	if err != nil {
+		return "", nil, err
+	}
+	return token, access, nil
+}
+
+// AccessCompanyProfileCMS grants entry to the company-profile article CMS.
+const AccessCompanyProfileCMS = "company-profile-cms"
+
+// computeAccess lists the Shifd apps the user may enter, recomputed from DB
+// state on every login and refresh: each product the org has an active
+// subscription for, plus the article CMS for platform admins. Downstream apps
+// trust this claim for entry only — SIS's own /api/admin/* routes still
+// re-check is_platform_admin in the DB (security rule #8).
+func computeAccess(user *model.User, products []string) []string {
+	access := make([]string, 0, len(products)+1)
+	access = append(access, products...)
+	if user.IsPlatformAdmin {
+		access = append(access, AccessCompanyProfileCMS)
+	}
+	return access
 }
 
 func (s *AuthService) issueRefreshToken(ctx context.Context, userID uuid.UUID, membership *model.OrgMembership, deviceInfo string) (string, error) {
@@ -367,11 +401,13 @@ func (s *AuthService) issueRefreshToken(ctx context.Context, userID uuid.UUID, m
 // Structure. org_id/org_role/products/user_limit are omitted when membership
 // is nil. user_limit is -1 when the org's active subscriptions carry no seat
 // limit (unlimited), keeping the claim an integer for downstream parsing.
-func buildClaims(user *model.User, membership *model.OrgMembership, products []string, userLimit *int) map[string]interface{} {
+// access is always present (possibly empty), unlike the org claims.
+func buildClaims(user *model.User, membership *model.OrgMembership, products []string, userLimit *int, access []string) map[string]interface{} {
 	claims := map[string]interface{}{
-		"sub":   user.ID.String(),
-		"email": user.Email,
-		"name":  user.Name,
+		"sub":    user.ID.String(),
+		"email":  user.Email,
+		"name":   user.Name,
+		"access": access,
 	}
 	if membership != nil {
 		claims["org_id"] = membership.OrgID.String()
@@ -389,35 +425,35 @@ func buildClaims(user *model.User, membership *model.OrgMembership, products []s
 // Refresh validates rawRefreshToken and issues a new access token. The org
 // context is re-derived from current DB state (not trusted from the token),
 // and the refresh token itself is never rotated.
-func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (string, error) {
+func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (*RefreshResult, error) {
 	tokenHash := hashToken(rawRefreshToken)
 
 	refreshToken, err := s.refreshTokenRepo.FindByTokenHash(ctx, tokenHash)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", ErrTokenInvalid
+			return nil, ErrTokenInvalid
 		}
-		return "", fmt.Errorf("auth: failed to look up refresh token: %w", err)
+		return nil, fmt.Errorf("auth: failed to look up refresh token: %w", err)
 	}
 	if refreshToken.RevokedAt != nil {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	if time.Now().UTC().After(refreshToken.ExpiresAt) {
-		return "", ErrTokenExpired
+		return nil, ErrTokenExpired
 	}
 
 	user, err := s.userRepo.FindByID(ctx, refreshToken.UserID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", ErrTokenInvalid
+			return nil, ErrTokenInvalid
 		}
-		return "", fmt.Errorf("auth: failed to look up user: %w", err)
+		return nil, fmt.Errorf("auth: failed to look up user: %w", err)
 	}
 
 	// Refuse to mint access tokens for a currently-locked account (defence in
 	// depth alongside revoking refresh tokens at lock time).
 	if s.isLockActive(user) {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 
 	// If the org membership bound to this refresh token is no longer active,
@@ -432,12 +468,16 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefreshToken string) (stri
 			membership = candidate
 			products, userLimit, err = s.loadProductsAndUserLimit(ctx, candidate.OrgID)
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 		}
 	}
 
-	return s.issueAccessToken(user, membership, products, userLimit)
+	accessToken, access, err := s.issueAccessToken(user, membership, products, userLimit)
+	if err != nil {
+		return nil, err
+	}
+	return &RefreshResult{AccessToken: accessToken, Access: access}, nil
 }
 
 // Logout revokes the refresh token identified by rawRefreshToken. It is

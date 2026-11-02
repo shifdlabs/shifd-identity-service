@@ -236,11 +236,13 @@ Refresh token expiry: 7 days (stored in DB as SHA-256 hash)
   "name": "John Doe",
   "org_id": "<org_uuid>",
   "org_role": "admin",
-  "products": ["shifd-approval"]
+  "products": ["shifd-approval"],
+  "access": ["shifd-approval", "company-profile-cms"]
 }
 ```
 
 Field notes:
+- `access` = apps the user may enter, always present (possibly empty), recomputed from DB on every login/refresh: every active product_id of the org, plus `"company-profile-cms"` when `users.is_platform_admin = true`. Also returned as `data.access` in the login and refresh responses. Downstream apps (e.g. shifd-article-service) gate entry on it; SIS's own admin routes still follow rule #8.
 - `sub` = users.id
 - `org_id` = the organization context for this session
 - `org_role` = user's role in that org: `"owner"`, `"admin"`, or `"member"`
