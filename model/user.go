@@ -18,6 +18,10 @@ type User struct {
 	EmailVerifiedAt *time.Time     `gorm:"column:email_verified_at"`
 	IsLocked        bool           `gorm:"column:is_locked;not null;default:false"`
 	LockTimestamp   *time.Time     `gorm:"column:lock_timestamp"`
+	// IsActive is a permanent admin-controlled deactivation flag — unlike
+	// IsLocked (brute-force lockout, auto-expires), this never expires on its
+	// own; only an admin flipping it back to true reactivates the account.
+	IsActive bool `gorm:"column:is_active;not null;default:true"`
 	CreatedAt       time.Time      `gorm:"column:created_at;not null;default:now()"`
 	UpdatedAt       time.Time      `gorm:"column:updated_at;not null;default:now()"`
 	DeletedAt       gorm.DeletedAt `gorm:"column:deleted_at;index"`

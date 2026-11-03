@@ -127,6 +127,7 @@ func New(
 			admin.GET("/users", adminHandler.ListUsers)
 			admin.GET("/users/:uid", adminHandler.GetUser)
 			admin.POST("/users/:uid/force-logout", adminHandler.ForceLogout)
+			admin.PATCH("/users/:uid/active", adminHandler.SetUserActive)
 			admin.POST("/activation-link", adminHandler.CreateActivationLink)
 			admin.GET("/activity", adminHandler.ListActivity)
 		}

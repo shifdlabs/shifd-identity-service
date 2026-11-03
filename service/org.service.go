@@ -30,6 +30,7 @@ var (
 	ErrOrgNotFound             = errors.New("organization not found")
 	ErrUserNotFound            = errors.New("user not found")
 	ErrAlreadyMember           = errors.New("user is already a member of this organization")
+	ErrUserAlreadyInAnotherOrg = errors.New("user already belongs to another organization")
 	ErrMembershipNotFound      = errors.New("membership not found")
 	ErrInviteNotFound          = errors.New("no pending invite found for this user and organization")
 	ErrInviteExpired           = errors.New("invite has expired")
@@ -105,6 +106,15 @@ func (s *OrgService) CreateOrg(ctx context.Context, userID uuid.UUID, name, slug
 		return nil, ErrSlugAlreadyExists
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("org: failed to check existing slug: %w", err)
+	}
+
+	// A user can belong to at most one organization. Checked here (not just
+	// filtered out of the admin panel's owner-search suggestions) so this
+	// holds regardless of caller — self-serve org creation or admin-created.
+	if existing, err := s.membershipRepo.FindAllByUserID(ctx, userID); err != nil {
+		return nil, fmt.Errorf("org: failed to check existing memberships: %w", err)
+	} else if len(existing) > 0 {
+		return nil, ErrUserAlreadyInAnotherOrg
 	}
 
 	org := &model.Organization{

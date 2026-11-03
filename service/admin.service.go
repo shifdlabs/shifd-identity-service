@@ -201,6 +201,15 @@ func (s *AdminService) AddMember(ctx context.Context, orgID uuid.UUID, email, ro
 		return nil, fmt.Errorf("admin: failed to check existing membership: %w", err)
 	}
 
+	// A user can belong to at most one organization (see CreateOrg for the
+	// same rule on the owner side) — reject adding someone who already has a
+	// membership in a different org, rather than only catching same-org dupes.
+	if existing, err := s.membershipRepo.FindAllByUserID(ctx, user.ID); err != nil {
+		return nil, fmt.Errorf("admin: failed to check existing memberships: %w", err)
+	} else if len(existing) > 0 {
+		return nil, ErrUserAlreadyInAnotherOrg
+	}
+
 	if err := s.subscriptionSvc.EnforceUserLimit(ctx, orgID); err != nil {
 		return nil, err
 	}
@@ -293,12 +302,13 @@ func (s *AdminService) lockedUntil(user *model.User) *time.Time {
 }
 
 // ListUsers returns a page of users ordered newest-first, optionally filtered
-// by a case-insensitive partial match on email. Each row carries the user's
-// last login and live session count, fetched in one extra grouped query for
-// the whole page rather than one per user.
-func (s *AdminService) ListUsers(ctx context.Context, page, limit int, emailSearch string) ([]AdminUser, int64, error) {
+// by a case-insensitive partial match on email and/or restricted to users with
+// no existing org membership (see UserRepository.ListPaginated). Each row
+// carries the user's last login and live session count, fetched in one extra
+// grouped query for the whole page rather than one per user.
+func (s *AdminService) ListUsers(ctx context.Context, page, limit int, emailSearch string, excludeOrgMembers bool) ([]AdminUser, int64, error) {
 	offset, limit := normalizePagination(page, limit)
-	users, total, err := s.userRepo.ListPaginated(ctx, offset, limit, emailSearch)
+	users, total, err := s.userRepo.ListPaginated(ctx, offset, limit, emailSearch, excludeOrgMembers)
 	if err != nil {
 		return nil, 0, fmt.Errorf("admin: failed to list users: %w", err)
 	}
@@ -387,6 +397,32 @@ func (s *AdminService) GetUserDetail(ctx context.Context, userID uuid.UUID) (*Ad
 func (s *AdminService) ForceLogout(ctx context.Context, userID uuid.UUID) error {
 	if err := s.refreshTokenRepo.RevokeAllByUserID(ctx, userID); err != nil {
 		return fmt.Errorf("admin: failed to revoke refresh tokens: %w", err)
+	}
+	return nil
+}
+
+// SetUserActive activates or deactivates userID's account. Deactivating also
+// force-logs-out every session, same as ForceLogout — an access token already
+// issued still works until it naturally expires (Login/Refresh reject the
+// account going forward), which is an accepted limitation, not a bug.
+func (s *AdminService) SetUserActive(ctx context.Context, userID uuid.UUID, active bool) error {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("admin: failed to look up user: %w", err)
+	}
+
+	user.IsActive = active
+	if err := s.userRepo.Update(ctx, user); err != nil {
+		return fmt.Errorf("admin: failed to update user: %w", err)
+	}
+
+	if !active {
+		if err := s.refreshTokenRepo.RevokeAllByUserID(ctx, userID); err != nil {
+			return fmt.Errorf("admin: failed to revoke refresh tokens: %w", err)
+		}
 	}
 	return nil
 }
